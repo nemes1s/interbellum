@@ -1,0 +1,661 @@
+# Indurex — Agentic Alert Investigation Engine
+
+A backend for running structured, fully auditable security-alert
+investigations in industrial/OT environments.
+
+A security engineer authors a **playbook**: a versioned decision graph of
+questions and outcomes. When an **alert** arrives, an analyst or an automated
+agent starts an **investigation** against a published version of that playbook
+and works through it one decision at a time. Every decision is recorded with
+the node it was made at, the choice taken, who or what took it, why, and the
+evidence gathered — so a completed investigation can be replayed in full,
+years later, exactly as it happened.
+
+A human UI and an automated agent use **the same API**. There is no separate
+agent surface, and no LLM is embedded in the engine.
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Walkthrough](#walkthrough)
+- [Architecture](#architecture)
+- [Key decisions and trade-offs](#key-decisions-and-trade-offs)
+- [API](#api)
+- [Testing](#testing)
+- [Configuration](#configuration)
+- [Production considerations](#production-considerations)
+- [What was intentionally left out](#what-was-intentionally-left-out)
+
+---
+
+## Quick start
+
+Requires Docker. Nothing else.
+
+```bash
+docker compose up --build
+```
+
+That starts PostgreSQL and the API. The API applies its own database
+migrations at startup and logs what it applied — there is no migration
+sidecar and no setup script. When it is ready:
+
+```bash
+curl -s localhost:8080/readyz
+# {"status":"ok"}
+```
+
+To tear it down, including the database volume:
+
+```bash
+docker compose down -v
+```
+
+<details>
+<summary>Using Podman instead of Docker</summary>
+
+Everything works unchanged — the Dockerfile and compose file use no
+Docker-specific features. Substitute `podman` for `docker` (verified against
+Podman 5.7 with `podman-compose`):
+
+```bash
+podman compose up --build -d
+podman compose down -v
+```
+
+A `docker` → `podman` shell alias also works, and makes the commands above
+copy-pasteable as written.
+
+</details>
+
+### Running without Docker
+
+Needs Go 1.25+ and a reachable PostgreSQL.
+
+```bash
+make docker-up-db      # or bring your own PostgreSQL
+make run               # applies migrations, then serves on :8080
+```
+
+`make help` lists every available target.
+
+---
+
+## Walkthrough
+
+The script below performs the complete lifecycle against a running API —
+create a playbook, publish it, ingest an alert, start an investigation, make
+three decisions, fetch the audit report, and confirm a completed investigation
+rejects further decisions. Every ID is captured from a real response.
+
+```bash
+./scripts/walkthrough.sh          # requires curl and jq
+```
+
+If you would rather run it by hand, the same sequence in `curl`. Each command
+is complete and executable; shell variables are populated from actual
+responses, so there is nothing to paste in.
+
+**1. Create the playbook** (from the committed fixture — the assignment's
+example decision tree):
+
+```bash
+PLAYBOOK=$(curl -s -X POST localhost:8080/api/v1/playbooks \
+  -H 'Content-Type: application/json' \
+  -d @test/fixtures/example-playbook.json)
+
+PLAYBOOK_ID=$(echo "$PLAYBOOK"  | jq -r '.id')
+VERSION_ID=$(echo "$PLAYBOOK"   | jq -r '.versions[0].id')
+echo "playbook=$PLAYBOOK_ID version=$VERSION_ID"
+```
+
+**2. Publish it.** This runs graph validation; the version becomes immutable.
+
+```bash
+curl -s -X POST "localhost:8080/api/v1/playbook-versions/$VERSION_ID/publish" \
+  | jq '{version, status, published_at, nodes: (.nodes|length)}'
+```
+
+Publishing an invalid graph returns `422` with *every* problem found, not just
+the first:
+
+```json
+{
+  "code": "INVALID_PLAYBOOK_GRAPH",
+  "message": "playbook graph is not valid for publishing (3 problem(s) found)",
+  "details": [
+    { "node_id": "aa00…01", "reason": "cycle_detected" },
+    { "node_id": "aa00…02", "reason": "cycle_detected" },
+    { "node_id": "aa00…03", "reason": "unreachable_from_root" }
+  ]
+}
+```
+
+**3. Ingest the alert:**
+
+```bash
+ALERT_ID=$(curl -s -X POST localhost:8080/api/v1/alerts \
+  -H 'Content-Type: application/json' \
+  -d @test/fixtures/example-alert.json | jq -r '.id')
+echo "alert=$ALERT_ID"
+```
+
+**4. Start the investigation:**
+
+```bash
+INVESTIGATION_ID=$(curl -s -X POST "localhost:8080/api/v1/alerts/$ALERT_ID/investigations" \
+  -H 'Content-Type: application/json' \
+  -d "{\"playbook_version_id\":\"$VERSION_ID\"}" | jq -r '.id')
+
+curl -s "localhost:8080/api/v1/investigations/$INVESTIGATION_ID" \
+  | jq '{status, question: .current_node.title,
+         choices: [.available_choices[] | {label, edge_id}]}'
+```
+
+```json
+{
+  "status": "in_progress",
+  "question": "Write came from a known engineering workstation?",
+  "choices": [
+    { "label": "Yes", "edge_id": "e0000000-0000-4000-8000-000000000001" },
+    { "label": "No",  "edge_id": "e0000000-0000-4000-8000-000000000002" }
+  ]
+}
+```
+
+This single response is everything an agent needs to act: the alert payload,
+the current question, the designer's hints, the selectable choices, and the
+history so far.
+
+**5. Submit decisions.** The helper picks the edge by label, exactly as an
+agent would — read the current choices, then submit one of their `edge_id`s.
+
+```bash
+decide() {
+  local label="$1" rationale="$2" evidence="$3"
+  local edge_id
+  edge_id=$(curl -s "localhost:8080/api/v1/investigations/$INVESTIGATION_ID" \
+    | jq -r --arg l "$label" '.available_choices[] | select(.label==$l) | .edge_id')
+
+  curl -s -X POST "localhost:8080/api/v1/investigations/$INVESTIGATION_ID/decisions" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: $(uuidgen)" \
+    -d "$(jq -nc --arg e "$edge_id" --arg r "$rationale" --argjson ev "$evidence" \
+      '{edge_id:$e, actor:{type:"agent", id:"investigation-agent-v1"},
+        rationale:$r, evidence:$ev}')"
+}
+
+decide "Yes" "The source address belongs to ENG-WS-14, a registered engineering workstation." \
+  '[{"type":"asset_inventory_lookup","summary":"10.20.1.44 maps to ENG-WS-14","data":{"asset":"ENG-WS-14","trusted":true}}]' \
+  | jq '{status, next_question: .current_node.title}'
+
+decide "Yes" "Change calendar shows an approved window 10:00-12:00 UTC covering PLC-17." \
+  '[{"type":"change_calendar_lookup","summary":"Approved window 10:00-12:00 UTC","data":{"change_id":"CHG-4471"}}]' \
+  | jq '{status, next_question: .current_node.title}'
+
+decide "No" "Register 40021 is a non-safety setpoint; the SIS range is 41000-41100." \
+  '[{"type":"register_map_lookup","summary":"40021 is outside the SIS register range","data":{"sis_range":"41000-41100"}}]' \
+  | jq '{status, final_resolution, outcome: .current_node.title}'
+```
+
+The third decision reaches a terminal node:
+
+```json
+{
+  "status": "completed",
+  "final_resolution": "close_authorized_maintenance",
+  "outcome": "Close: authorized maintenance"
+}
+```
+
+**6. Fetch the audit report:**
+
+```bash
+curl -s "localhost:8080/api/v1/investigations/$INVESTIGATION_ID/report" | jq '{
+  investigation,
+  playbook_version: {id: .playbook_version.id, version: .playbook_version.version,
+                     status: .playbook_version.status,
+                     nodes: (.playbook_version.nodes|length)},
+  path: [.path[] | {step_number, node_id, selected_edge_id,
+                    actor: .actor.id, rationale, evidence: [.evidence[].type]}]
+}'
+```
+
+The report returns the **complete playbook graph** together with a separate
+ordered **path** — the exact route taken, with timestamps, actors, rationale
+and evidence at each step.
+
+**7. Confirm the safety property.** A completed investigation cannot be
+advanced:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST "localhost:8080/api/v1/investigations/$INVESTIGATION_ID/decisions" \
+  -H 'Content-Type: application/json' \
+  -d '{"edge_id":"e0000000-0000-4000-8000-000000000001","actor":{"type":"human","id":"analyst"}}'
+# 409
+```
+
+---
+
+## Architecture
+
+Layering, and the rules that keep it honest, are in
+[docs/package-structure.md](docs/package-structure.md). Deployment topology,
+observability and scaling are in [docs/architecture.md](docs/architecture.md).
+The full entity model and invariant list are in
+[docs/domain-model.md](docs/domain-model.md).
+
+```
+http  ─▶  service  ─▶  domain  ◀─  repository/postgres
+```
+
+`internal/domain` has no framework dependencies at all — no pgx, no chi, no
+`net/http`. That is what makes the rules that matter (graph validation,
+transition legality, terminal behaviour) testable with no database and no
+server.
+
+### Playbooks and versions
+
+`playbooks` is the logical container; `playbook_versions` holds the actual
+decision graphs; `playbook_nodes` and `playbook_edges` hold the graph
+relationally. An investigation binds to a **`playbook_version_id`**, never to
+a playbook.
+
+Lifecycle is `draft -> published -> archived`. Drafts are freely editable.
+Publishing validates the graph and freezes the version permanently: there is
+no API path that mutates a published definition. Editing a published playbook
+means creating a *new* version (optionally cloned from an existing one, with
+fresh node and edge IDs so the two never share rows).
+
+This is the property everything else rests on: **an investigation from last
+year still resolves against exactly the graph it ran on**, no matter how many
+times the playbook has been revised since. There is an integration test for
+precisely this (`TestHistoricalInvestigationSurvivesPlaybookRevision`).
+
+### Graph model: strict DAG
+
+Cycles are rejected at publish time. This was chosen over general-graph
+semantics with traversal guards because it matches how investigation
+procedures are actually written, and because it removes a whole class of
+runtime concern — with an acyclic graph, decision-time traversal needs no
+depth limit or loop detection at all.
+
+Re-convergence *is* allowed: two branches may lead to the same terminal
+outcome, which is natural ("either way, escalate") and harmless.
+
+Publish-time validation reports **all** problems at once: missing root,
+dangling references, unreachable nodes, cycles, decision nodes with no
+choices, terminal nodes with choices, and resolution/kind mismatches.
+
+### Investigation audit trail
+
+`investigation_steps` is append-only and is **the authoritative history**.
+`investigations.current_node_id` is a convenience projection maintained in the
+same transaction — useful for "what can I do next", never used to reconstruct
+what happened. The report is always built from steps.
+
+No route exists that updates or deletes a step. There is no `PUT`, no
+`PATCH`, no `DELETE` anywhere on investigation history, which is tested
+explicitly (`TestNoRouteMutatesInvestigationHistory`).
+
+### Concurrency
+
+Submitting a decision is one transaction taking `SELECT ... FOR UPDATE` on the
+investigation row, then validating, appending the step, and updating state
+before commit. Two agents racing on one investigation serialize; the first
+applies, and the second is rejected with `409 INVALID_TRANSITION` because its
+edge no longer leaves the (now advanced) current node.
+
+A row lock was chosen over an optimistic version column because contention is
+rare, the critical section is short, and the failure mode is a clean rejection
+rather than a retry loop every client must implement. Reasoning in full in
+[docs/architecture.md §3](docs/architecture.md).
+
+### Database integrity
+
+The schema does real work rather than just storing rows. Composite foreign
+keys guarantee that an edge's endpoints live in the same playbook version as
+the edge, that an investigation's current node belongs to its own version, and
+that a step's node and edge belong to its investigation's own version — so
+even a service-layer bug cannot record a step pointing into an unrelated
+playbook. `CHECK` constraints enforce "terminal resolution set iff terminal
+node" and the completion invariant. A partial unique index makes alert
+ingestion idempotent on `external_id`; another makes decision retries
+idempotent per investigation.
+
+### Why PostgreSQL, and where JSONB is used
+
+The core model is relational: playbooks, versions, nodes, edges,
+investigations and steps all have stable shapes, real referential integrity
+requirements, and queries that traverse them. Transactions are what make the
+decision operation correct.
+
+JSONB is used in exactly three places, all of them genuinely schemaless:
+`alerts.payload` (domain-specific data the engine must not need to understand),
+`investigation_steps.evidence` (producers disagree about everything but "type,
+summary, arbitrary detail"), and `playbook_nodes.metadata` (designer hints).
+Nothing structural lives in JSONB.
+
+---
+
+## Key decisions and trade-offs
+
+### Relational graph, not one JSON document
+
+A playbook version *could* be one JSONB column. Storing nodes and edges as
+rows was chosen because it lets the database enforce the graph's integrity
+rather than trusting application code: an edge cannot reference a node from
+another version, a step cannot reference an edge from another playbook, and a
+version cannot point at a root that is not its own. Those are composite
+foreign keys, and they are unavailable in a JSON blob.
+
+It also means individual nodes and edges are addressable and queryable, and
+large playbooks do not require rewriting one enormous document on every edit.
+The cost is a more elaborate write path — replacing a draft's graph is a
+seven-statement transaction whose ordering is dictated by those same foreign
+keys — which is accepted because it buys integrity that cannot be regressed by
+a future code change. The API still accepts and returns the whole graph in one
+payload, so callers never see this.
+
+### Immutable published versions
+
+An investigation is a record of a decision made under a specific procedure. If
+the procedure could change underneath it, the record would become unreadable —
+"why did we close this?" would have no answerable form. So publishing freezes,
+and editing forks a new version.
+
+The cost is version proliferation and a slightly heavier editing flow. That is
+the right trade for a system whose primary product is auditability.
+
+### Append-only history, separate from current state
+
+Keeping `investigation_steps` distinct from `investigations.current_node_id`
+means history can never be lost to an update. The pointer is derived state; the
+steps are the truth. It costs one extra table and one extra write per decision,
+and it is what makes "reconstruct exactly what happened" a query rather than an
+archaeology exercise.
+
+### Report: canonical graph plus a separate path
+
+The report returns the playbook graph and an ordered `path` array as separate
+top-level fields, rather than annotating graph nodes with
+`was_visited` / `was_selected` / `step_number` flags.
+
+The graph belongs to the playbook version and is identical for every
+investigation that used it; the path belongs to this one run. Keeping them
+apart means a UI can cache the graph per version and overlay any number of
+paths on it, comparing two investigations is a diff of two small arrays, and a
+completed investigation's path is stable regardless of anything else in the
+system. Embedding flags would make the graph a per-investigation object and
+force a re-fetch for every one. A UI highlights the route by indexing `path`
+by `node_id` — a two-line transform.
+
+### Synchronous API, not a workflow engine
+
+Every operation is a short state transition on one row, initiated by a caller
+who wants the result. There is no long-running work to schedule and nothing to
+retry in the background, so a queue or workflow engine would add operational
+surface and an eventual-consistency window in exchange for nothing.
+
+Autonomous investigation fits naturally *without* changing this: an agent that
+gathers evidence from historians, asset inventories or an LLM runs outside the
+API and calls `POST /decisions` exactly as a human UI does. Slow, failure-prone
+external calls stay out of the decision transaction. See
+[docs/architecture.md §7](docs/architecture.md).
+
+### No built-in LLM
+
+The engine exposes an agent-friendly API and stops there. `GET
+/investigations/{id}` returns the alert payload, the current question, the
+designer's metadata hints, the available choices and the full history in one
+response — enough for a model to reason and act — and `POST /decisions`
+accepts free-form rationale and evidence.
+
+Embedding a provider would couple workflow state to a model's availability,
+pricing and output format, and make the audit trail depend on a vendor.
+Keeping the agent a *client* means the engine is equally usable by a human, a
+rules engine, a script, or a model, and the recorded investigation looks the
+same in all four cases.
+
+### Idempotency
+
+`POST /decisions` accepts an optional `Idempotency-Key` header, unique per
+investigation. Retrying an equivalent request is a no-op that returns current
+state; reusing the key with a *different* body is rejected with `409
+IDEMPOTENCY_KEY_REUSED` rather than silently returning the wrong step.
+
+This matters specifically because agents time out and retry, and a duplicate
+step would corrupt an audit trail that is supposed to be exact. The retry is
+recognised *before* the completion check, so a retry that arrives after the
+original decision closed the investigation is still a correct no-op rather
+than a spurious "already completed" error.
+
+Alert ingestion is idempotent too, on `external_id`, because upstream alerting
+systems retry the same way. First write wins: a retry with drifted values
+returns what was originally stored rather than rewriting a record an
+investigation may already reference.
+
+---
+
+## API
+
+The full contract is [`api/openapi.yaml`](api/openapi.yaml) (OpenAPI 3.0.3),
+with schemas, status codes and examples. It is usable standalone by a frontend
+or an agent, and is linted in CI.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/healthz` | Process liveness (checks nothing external) |
+| `GET` | `/readyz` | Readiness, including database connectivity |
+| `POST` | `/api/v1/playbooks` | Create a playbook, optionally with an initial draft graph |
+| `GET` | `/api/v1/playbooks` | List playbooks (filterable by `alert_type`) |
+| `GET` | `/api/v1/playbooks/{playbookId}` | Playbook metadata and its versions |
+| `POST` | `/api/v1/playbooks/{playbookId}/versions` | New draft version, optionally cloned |
+| `GET` | `/api/v1/playbook-versions/{versionId}` | Full graph definition |
+| `PUT` | `/api/v1/playbook-versions/{versionId}` | Replace a draft's graph (409 if published) |
+| `POST` | `/api/v1/playbook-versions/{versionId}/publish` | Validate and publish |
+| `POST` | `/api/v1/alerts` | Ingest an alert (idempotent on `external_id`) |
+| `GET` | `/api/v1/alerts/{alertId}` | Retrieve an alert |
+| `POST` | `/api/v1/alerts/{alertId}/investigations` | Start an investigation |
+| `GET` | `/api/v1/investigations/{investigationId}` | Current state and available choices |
+| `POST` | `/api/v1/investigations/{investigationId}/decisions` | Submit a decision |
+| `GET` | `/api/v1/investigations/{investigationId}/report` | Full audit report |
+
+### Errors
+
+Every failure returns a machine-readable envelope. Clients branch on `code`,
+never on message text.
+
+```json
+{
+  "code": "INVALID_TRANSITION",
+  "message": "edge 5b1f… originates at node a000…03, but the investigation is at node a000…01"
+}
+```
+
+| Status | Codes |
+|---|---|
+| 400 | `BAD_REQUEST`, `VALIDATION_FAILED` |
+| 404 | `RESOURCE_NOT_FOUND` |
+| 409 | `CONFLICT`, `PLAYBOOK_VERSION_NOT_DRAFT`, `PLAYBOOK_VERSION_NOT_PUBLISHED`, `INVESTIGATION_ALREADY_COMPLETED`, `INVALID_TRANSITION`, `IDEMPOTENCY_KEY_REUSED` |
+| 405 | `METHOD_NOT_ALLOWED` |
+| 413 | `PAYLOAD_TOO_LARGE` |
+| 422 | `INVALID_PLAYBOOK_GRAPH` (with a `details` array of every graph problem) |
+| 503 | `NOT_READY` |
+
+Database errors are never surfaced. Anything unclassified becomes a `500` with
+a fixed opaque message; the cause goes to the logs.
+
+### Safety properties the server enforces
+
+A client — human or agent — cannot:
+
+- choose an arbitrary next node (it selects an *edge*; the server derives the node);
+- submit an edge that does not originate at the current node;
+- submit an edge belonging to a different playbook version;
+- advance a completed investigation;
+- modify a published playbook;
+- rewrite or delete a recorded step.
+
+Each of these has a dedicated test in `test/integration/api_safety_test.go`.
+
+---
+
+## Testing
+
+```bash
+make test               # unit tests, no database needed
+make test-integration   # everything, against a real PostgreSQL
+make lint               # gofmt + go vet
+```
+
+`make test-integration` expects PostgreSQL at
+`postgres://indurex:indurex@localhost:5432/indurex`, which is what
+`make docker-up-db` provides:
+
+```bash
+make docker-up-db && make test-integration
+```
+
+Point it elsewhere with `TEST_DATABASE_URL=... make test-integration`.
+
+**Unit tests** (`internal/domain/...`) cover the rules, with no database and
+no HTTP: graph validation and every illegal-graph case, valid and invalid
+transition selection, terminal-node behaviour, terminal-root investigations,
+and publishing rules.
+
+**Integration tests** (`test/integration/`) run against real PostgreSQL —
+never mocks, because most of what they protect (composite foreign keys, unique
+indexes, row locking, transaction atomicity) has no behaviour in a mock. They
+cover playbook persistence and cloning, publish validation and freezing,
+append-only ordered history, decision advancement and terminal completion,
+concurrent decisions serializing, idempotent retries, and the full HTTP stack
+including routing, decoding and error mapping.
+
+The headline test is `TestFullInvestigationWorkflow`: create and publish the
+example playbook, ingest the alert, start an investigation, submit three
+decisions, reach a terminal state, request the report, and assert the exact
+path, rationale, evidence and resolution.
+
+Integration tests **skip** rather than fail when `TEST_DATABASE_URL` is unset,
+so a fresh clone runs `go test ./...` green with no setup. CI runs both modes:
+once without a database (proving the domain tests genuinely need none) and once
+with one.
+
+---
+
+## Configuration
+
+All configuration is environment variables, with defaults suited to
+docker-compose. No secrets are committed.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `postgres://indurex:indurex@localhost:5432/indurex?sslmode=disable` | PostgreSQL connection string |
+| `HTTP_ADDR` | `:8080` | Listen address |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `json` | `json` or `text` (readable locally) |
+| `RUN_MIGRATIONS` | `true` | Apply migrations at startup |
+| `MAX_REQUEST_BYTES` | `1048576` | Request body limit |
+| `HTTP_READ_TIMEOUT` | `15s` | |
+| `HTTP_READ_HEADER_TIMEOUT` | `5s` | |
+| `HTTP_WRITE_TIMEOUT` | `30s` | |
+| `HTTP_IDLE_TIMEOUT` | `60s` | |
+| `SHUTDOWN_TIMEOUT` | `20s` | Graceful drain budget |
+| `DB_MAX_CONNS` | `10` | Pool size |
+| `DB_MIN_CONNS` | `2` | |
+| `DB_MAX_CONN_LIFETIME` | `1h` | |
+| `DB_MAX_CONN_IDLE_TIME` | `30m` | |
+| `DB_CONNECT_TIMEOUT` | `10s` | |
+
+---
+
+## Production considerations
+
+**Authentication and authorization.** Out of scope here; the API is
+unauthenticated. Production would place it behind an authenticating gateway
+with these roles:
+
+| Role | Permissions |
+|---|---|
+| Playbook designer | Create and edit drafts, **publish** versions. Cannot submit decisions. |
+| Analyst | Start investigations, submit decisions, read reports. Cannot modify playbooks. |
+| Automated agent | Same as analyst, scoped to specific alert types. Explicitly **cannot** modify playbooks. |
+| Read-only auditor | Read playbooks, investigations and reports. No writes at all. |
+
+The important consequence is that `actor` stops being self-reported: it would
+be derived from the authenticated principal and the request field ignored,
+making the audit trail attributable rather than merely descriptive.
+
+**Secrets.** `DATABASE_URL` from a secret manager, injected as an environment
+variable or a mounted file. The compose credentials are local development
+values, not secrets.
+
+**Database HA and backups.** Managed PostgreSQL (or a primary with a
+synchronous standby), automated backups plus point-in-time recovery. An
+investigation report is a record of a security decision; losing one is losing
+evidence. Read replicas for report and analytics traffic once that grows.
+
+**Rate limiting.** At the gateway, per authenticated principal. Agents are the
+concern: a retry loop against `POST /decisions` should be shed at the edge, not
+absorbed by the database.
+
+**Observability.** Structured logs are implemented. Production would add
+metrics, tracing, error-rate and latency alerts, database monitoring, and a
+domain-level alert on investigations stuck `in_progress` — an agent that dies
+mid-investigation produces no error anywhere else. See
+[docs/architecture.md §5](docs/architecture.md).
+
+**Evidence retention and large artifacts.** Investigations and steps are
+compliance records kept for years. Large binary evidence (pcaps, screenshots,
+historian exports) belongs in object storage, referenced by key from the
+evidence JSON, with a shorter lifecycle policy — the reference stays in the
+audit trail after the object expires, so the report still shows what was
+collected. See [docs/architecture.md §6](docs/architecture.md).
+
+**Async processing.** Not needed at this scale and deliberately absent; the
+conditions that would justify it (autonomous evidence-gathering agents,
+high-volume ingestion) and why neither requires an API redesign are in
+[docs/architecture.md §7](docs/architecture.md).
+
+**Idempotency.** Implemented for decisions and alert ingestion. Production
+would add a retention policy for idempotency keys — they accumulate forever
+today, which is fine at this scale but is a slow leak at high volume.
+
+**Schema evolution.** Migrations are backward compatible for the length of a
+rollout, since old and new instances share a schema. Additive changes ship
+freely; destructive ones ship a release later. Production would run
+`cmd/migrate` as a separate deployment step rather than at API startup — see
+[docs/architecture.md §4](docs/architecture.md).
+
+---
+
+## What was intentionally left out
+
+Each of these was a deliberate scope decision, to keep the work concentrated
+on the investigation domain and its correctness.
+
+- **A frontend.** The API is the deliverable; the report response is shaped so
+  a UI can render the graph and highlight the path taken with almost no work.
+- **Production authentication and authorization.** Designed above, not built.
+  Building it would consume time without exercising the domain.
+- **An LLM provider integration.** Deliberate, and explained in [Key
+  decisions](#no-built-in-llm). The API is agent-shaped; the agent stays a
+  client.
+- **Server-side playbook auto-resolution by `alert_type`.** The assignment
+  offers it as optional. Requiring an explicit `playbook_version_id` means the
+  version an investigation is bound to is always the caller's recorded choice
+  rather than whatever happened to be published at that instant — which is the
+  more auditable behaviour, and simpler.
+- **Playbook archival workflow.** The `archived` status exists in the model
+  and the schema so the lifecycle is representable; no endpoint drives it.
+- **Kubernetes manifests, a message broker, a distributed tracing backend, and
+  a metrics stack.** Adding infrastructure that nothing uses would demonstrate
+  configuration, not judgment. The topology and what would trigger each
+  addition are documented in [docs/architecture.md](docs/architecture.md).
+- **Pagination on list endpoints.** `GET /playbooks` returns everything.
+  Playbook counts are small by nature; this would be the first thing to add if
+  that stopped being true.

@@ -1,0 +1,164 @@
+{
+  "name": "Unauthorized PLC Register Write",
+  "description": "Triage procedure for an unexpected write to a PLC holding register.",
+  "alert_type": "unauthorized_plc_register_write",
+  "definition": {
+    "root_node_id": "a0000000-0000-4000-8000-000000000001",
+    "nodes": [
+      {
+        "id": "a0000000-0000-4000-8000-000000000001",
+        "kind": "decision",
+        "title": "Write came from a known engineering workstation?",
+        "description": "Resolve the source address against the asset inventory.",
+        "metadata": {
+          "suggested_evidence": ["asset_inventory_lookup"],
+          "payload_fields": ["source_ip"]
+        }
+      },
+      {
+        "id": "a0000000-0000-4000-8000-000000000002",
+        "kind": "decision",
+        "title": "Inside an approved maintenance window?",
+        "description": "Check the change calendar for an approved window covering this asset.",
+        "metadata": { "suggested_evidence": ["change_calendar_lookup"] }
+      },
+      {
+        "id": "a0000000-0000-4000-8000-000000000003",
+        "kind": "decision",
+        "title": "Register tied to a safety (SIS) function?",
+        "description": "Determine whether the register participates in a safety instrumented function.",
+        "metadata": { "suggested_evidence": ["register_map_lookup"] }
+      },
+      {
+        "id": "a0000000-0000-4000-8000-000000000004",
+        "kind": "decision",
+        "title": "Historian shows anomalous process values?",
+        "description": "Compare process values around the write against the historian baseline.",
+        "metadata": { "suggested_evidence": ["historian_query"] }
+      },
+      {
+        "id": "a0000000-0000-4000-8000-000000000005",
+        "kind": "decision",
+        "title": "Source device seen on this network before?",
+        "description": "Check whether the source address has prior presence on this segment.",
+        "metadata": { "suggested_evidence": ["network_flow_history"] }
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000001",
+        "kind": "terminal",
+        "title": "Close: authorized maintenance",
+        "description": "Known workstation, approved window, non-safety register.",
+        "terminal_resolution": "close_authorized_maintenance"
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000002",
+        "kind": "terminal",
+        "title": "Escalate: safety review",
+        "description": "Authorized change touching a safety function requires review.",
+        "terminal_resolution": "escalate_safety_review"
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000003",
+        "kind": "terminal",
+        "title": "Escalate: unauthorized change",
+        "description": "Known workstation, but outside any approved maintenance window.",
+        "terminal_resolution": "escalate_unauthorized_change"
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000004",
+        "kind": "terminal",
+        "title": "Contain: isolate segment, start incident response",
+        "description": "Unknown source combined with anomalous process values.",
+        "terminal_resolution": "contain_isolate_segment"
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000005",
+        "kind": "terminal",
+        "title": "Escalate: suspicious activity",
+        "description": "Unknown source, no process anomaly, device seen before.",
+        "terminal_resolution": "escalate_suspicious_activity"
+      },
+      {
+        "id": "b0000000-0000-4000-8000-000000000006",
+        "kind": "terminal",
+        "title": "Escalate: possible intrusion",
+        "description": "Unknown source never seen on this network before.",
+        "terminal_resolution": "escalate_possible_intrusion"
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0000000-0000-4000-8000-000000000001",
+        "from_node_id": "a0000000-0000-4000-8000-000000000001",
+        "to_node_id": "a0000000-0000-4000-8000-000000000002",
+        "label": "Yes",
+        "description": "Source resolves to a registered engineering workstation.",
+        "sort_order": 1
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000002",
+        "from_node_id": "a0000000-0000-4000-8000-000000000001",
+        "to_node_id": "a0000000-0000-4000-8000-000000000004",
+        "label": "No",
+        "description": "Source is unknown or not an engineering workstation.",
+        "sort_order": 2
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000003",
+        "from_node_id": "a0000000-0000-4000-8000-000000000002",
+        "to_node_id": "a0000000-0000-4000-8000-000000000003",
+        "label": "Yes",
+        "sort_order": 1
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000004",
+        "from_node_id": "a0000000-0000-4000-8000-000000000002",
+        "to_node_id": "b0000000-0000-4000-8000-000000000003",
+        "label": "No",
+        "sort_order": 2
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000005",
+        "from_node_id": "a0000000-0000-4000-8000-000000000003",
+        "to_node_id": "b0000000-0000-4000-8000-000000000002",
+        "label": "Yes",
+        "sort_order": 1
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000006",
+        "from_node_id": "a0000000-0000-4000-8000-000000000003",
+        "to_node_id": "b0000000-0000-4000-8000-000000000001",
+        "label": "No",
+        "sort_order": 2
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000007",
+        "from_node_id": "a0000000-0000-4000-8000-000000000004",
+        "to_node_id": "b0000000-0000-4000-8000-000000000004",
+        "label": "Yes",
+        "sort_order": 1
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000008",
+        "from_node_id": "a0000000-0000-4000-8000-000000000004",
+        "to_node_id": "a0000000-0000-4000-8000-000000000005",
+        "label": "No",
+        "sort_order": 2
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000000009",
+        "from_node_id": "a0000000-0000-4000-8000-000000000005",
+        "to_node_id": "b0000000-0000-4000-8000-000000000005",
+        "label": "Yes",
+        "sort_order": 1
+      },
+      {
+        "id": "e0000000-0000-4000-8000-00000000000a",
+        "from_node_id": "a0000000-0000-4000-8000-000000000005",
+        "to_node_id": "b0000000-0000-4000-8000-000000000006",
+        "label": "No",
+        "sort_order": 2
+      }
+    ]
+  }
+}

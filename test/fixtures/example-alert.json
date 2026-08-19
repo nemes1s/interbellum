@@ -1,0 +1,12 @@
+{
+  "external_id": "INDUREX-2026-0001",
+  "alert_type": "unauthorized_plc_register_write",
+  "title": "Unauthorized PLC Register Write",
+  "description": "Write detected on PLC-17",
+  "occurred_at": "2026-08-19T10:30:00Z",
+  "payload": {
+    "plc": "PLC-17",
+    "register": "40021",
+    "source_ip": "10.20.1.44"
+  }
+}

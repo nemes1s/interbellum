@@ -1,0 +1,830 @@
+openapi: 3.0.3
+info:
+  title: Indurex Agentic Alert Investigation Engine API
+  version: "1.0.0"
+  license:
+    name: UNLICENSED
+  description: |
+    API for defining versioned investigation playbooks, ingesting security
+    alerts, and running structured, fully-auditable investigations against
+    them. A human analyst UI and an automated agent use exactly this API —
+    there is no separate "agent" surface.
+
+    The server owns workflow correctness: clients select an `edge_id` at the
+    current node; the server determines the resulting node. See
+    docs/domain-model.md for the full invariant list.
+servers:
+  - url: http://localhost:8080
+    description: Local docker-compose environment.
+
+# Authentication/authorization is intentionally out of scope for this
+# take-home; see README "Production considerations" for the intended
+# scheme (designer / analyst / agent / auditor roles).
+security: []
+
+tags:
+  - name: health
+    description: Liveness/readiness probes.
+  - name: playbooks
+    description: Playbook design — versioned decision graphs.
+  - name: alerts
+    description: Alert ingestion.
+  - name: investigations
+    description: Running and auditing investigations against a published playbook version.
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Process liveness.
+      description: |
+        Deliberately checks nothing external. If liveness depended on the
+        database, one database blip would make an orchestrator restart every
+        healthy replica.
+      responses:
+        "200":
+          description: Process is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+    head:
+      tags: [health]
+      operationId: headHealth
+      summary: Process liveness, without a response body.
+      description: |
+        Supported because container and load-balancer health checks commonly
+        issue HEAD rather than GET (`wget --spider`, for one).
+      responses:
+        "200":
+          description: Process is up.
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Database connectivity/readiness.
+      description: |
+        Reports whether this instance can actually serve requests. A failing
+        readiness probe should remove the instance from the load balancer
+        without restarting it.
+      responses:
+        "200":
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        "503":
+          description: Not ready (e.g. database unreachable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    head:
+      tags: [health]
+      operationId: headReadiness
+      summary: Readiness, without a response body.
+      description: |
+        Supported because container and load-balancer health checks commonly
+        issue HEAD rather than GET (`wget --spider`, for one).
+      responses:
+        "200":
+          description: Ready to serve traffic.
+        "503":
+          description: Not ready (e.g. database unreachable).
+
+  /api/v1/playbooks:
+    post:
+      tags: [playbooks]
+      operationId: createPlaybook
+      summary: Create a playbook, optionally with an initial draft graph.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePlaybookRequest" }
+      responses:
+        "201":
+          description: Playbook created (with an initial draft version).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookWithVersions" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      tags: [playbooks]
+      operationId: listPlaybooks
+      summary: List playbooks.
+      parameters:
+        - name: alert_type
+          in: query
+          schema: { type: string }
+          description: Filter by alert type.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Playbook" }
+
+  /api/v1/playbooks/{playbookId}:
+    parameters:
+      - $ref: "#/components/parameters/PlaybookId"
+    get:
+      tags: [playbooks]
+      operationId: getPlaybook
+      summary: Retrieve playbook metadata together with its version summaries.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookWithVersions" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/playbooks/{playbookId}/versions:
+    parameters:
+      - $ref: "#/components/parameters/PlaybookId"
+    post:
+      tags: [playbooks]
+      operationId: createPlaybookVersion
+      summary: Create a new draft version, optionally cloning an existing version's graph.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePlaybookVersionRequest" }
+      responses:
+        "201":
+          description: Draft version created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookVersionDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/playbook-versions/{versionId}:
+    parameters:
+      - $ref: "#/components/parameters/PlaybookVersionId"
+    get:
+      tags: [playbooks]
+      operationId: getPlaybookVersion
+      summary: Return the full graph definition for a version.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookVersionDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [playbooks]
+      operationId: replacePlaybookVersionGraph
+      summary: Replace a draft version's entire graph (nodes + edges + root).
+      description: Rejected with 409 if the version is not in `draft` status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlaybookGraphInput" }
+      responses:
+        "200":
+          description: Updated draft definition.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookVersionDefinition" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/playbook-versions/{versionId}/publish:
+    parameters:
+      - $ref: "#/components/parameters/PlaybookVersionId"
+    post:
+      tags: [playbooks]
+      operationId: publishPlaybookVersion
+      summary: Validate and publish a draft version.
+      description: |
+        On success the version becomes immutable and eligible to back new
+        investigations. On failure, no state changes and the full set of
+        graph problems is returned (not just the first one found).
+      responses:
+        "200":
+          description: Published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaybookVersionDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/InvalidGraph" }
+
+  /api/v1/alerts:
+    post:
+      tags: [alerts]
+      operationId: createAlert
+      summary: Create an alert.
+      description: |
+        Idempotent when `external_id` is supplied: if an alert with the same
+        `external_id` already exists, that existing alert is returned
+        unchanged (`200`) instead of creating a duplicate. This matches how
+        upstream alerting systems commonly retry ingestion after a timeout.
+        Without `external_id`, every request creates a new alert (`201`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAlertRequest" }
+            examples:
+              plcWrite:
+                value:
+                  external_id: "INDUREX-2026-0001"
+                  alert_type: "unauthorized_plc_register_write"
+                  title: "Unauthorized PLC Register Write"
+                  description: "Write detected on PLC-17"
+                  occurred_at: "2026-08-19T10:30:00Z"
+                  payload:
+                    plc: "PLC-17"
+                    register: "40021"
+                    source_ip: "10.20.1.44"
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "200":
+          description: An alert with this `external_id` already existed; it is returned unchanged (idempotent ingestion).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/alerts/{alertId}:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    get:
+      tags: [alerts]
+      operationId: getAlert
+      summary: Retrieve an alert.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/alerts/{alertId}/investigations:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      tags: [investigations]
+      operationId: startInvestigation
+      summary: Start an investigation for an alert against a published playbook version.
+      description: |
+        If the playbook version's root node is itself `terminal` (a
+        degenerate but valid playbook), the investigation is created already
+        `completed`, with `final_resolution` taken from the root node and
+        zero steps — see docs/domain-model.md §4.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartInvestigationRequest" }
+      responses:
+        "201":
+          description: Investigation started; response includes the root node and its choices.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestigationState" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Referenced playbook version is not published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/investigations/{investigationId}:
+    parameters:
+      - $ref: "#/components/parameters/InvestigationId"
+    get:
+      tags: [investigations]
+      operationId: getInvestigation
+      summary: Current investigation state — what an agent calls to decide what it can do next.
+      description: |
+        Returns the alert, investigation metadata, the current node, the
+        edges available from it (empty if completed), and the evidence/step
+        history collected so far.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestigationState" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/investigations/{investigationId}/decisions:
+    parameters:
+      - $ref: "#/components/parameters/InvestigationId"
+    post:
+      tags: [investigations]
+      operationId: submitDecision
+      summary: Submit a decision, advancing the investigation along the selected edge.
+      description: |
+        The server validates that the investigation is in progress, that
+        `edge_id` belongs to the investigation's playbook version, and that
+        it originates at the current node — the client can never choose the
+        next node directly. Concurrent submissions on the same investigation
+        are serialized; exactly one applies.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+          description: |
+            Optional client-supplied key, unique per investigation. Retrying
+            the same key with an equivalent request body (same `edge_id`,
+            `actor`, `rationale`, `evidence`) does not apply the decision
+            twice — it is a no-op that returns the current investigation
+            state, whatever it is at the time of the retry (not necessarily
+            the state right after the original decision, if later decisions
+            have since been applied). Retrying the same key with a
+            *different* body is rejected with `409 IDEMPOTENCY_KEY_REUSED`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitDecisionRequest" }
+            examples:
+              knownWorkstation:
+                value:
+                  edge_id: "5b1f7e2a-2222-4c11-9a4a-000000000001"
+                  actor:
+                    type: agent
+                    id: investigation-agent-v1
+                  rationale: "The source address belongs to ENG-WS-14, a registered engineering workstation."
+                  evidence:
+                    - type: asset_inventory_lookup
+                      summary: "10.20.1.44 maps to ENG-WS-14"
+                      data:
+                        asset: ENG-WS-14
+                        trusted: true
+      responses:
+        "200":
+          description: |
+            Decision applied. Response is the resulting investigation state:
+            either the next decision node with its choices, or the terminal
+            resolution.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestigationState" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            Investigation already completed; `edge_id` does not originate at
+            the current node / does not belong to this playbook version; or
+            `Idempotency-Key` was reused with a different request body
+            (`code: IDEMPOTENCY_KEY_REUSED`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/investigations/{investigationId}/report:
+    parameters:
+      - $ref: "#/components/parameters/InvestigationId"
+    get:
+      tags: [investigations]
+      operationId: getInvestigationReport
+      summary: Full auditable report — alert, playbook graph, and the exact path taken.
+      description: |
+        Returns the canonical playbook graph and a separate ordered `path`
+        array rather than embedding visited/selected flags on graph nodes
+        (see docs/domain-model.md and README "Key decisions" for the
+        rationale). A UI renders the graph once and overlays `path` to
+        highlight the route taken.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestigationReport" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  parameters:
+    PlaybookId:
+      name: playbookId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PlaybookVersionId:
+      name: versionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InvestigationId:
+      name: investigationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Invalid state transition (e.g. editing a published version).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    MethodNotAllowed:
+      description: |
+        The path exists but not for this HTTP method (`code:
+        METHOD_NOT_ALLOWED`). Applies to every endpoint; notably, no verb that
+        would mutate or delete recorded investigation history exists at all.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidGraph:
+      description: Semantically invalid playbook graph.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PublishValidationError" }
+
+  schemas:
+    # ---------------------------------------------------------------
+    # Errors
+    # ---------------------------------------------------------------
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: RESOURCE_NOT_FOUND
+        message:
+          type: string
+          example: "playbook version not found"
+        details:
+          type: array
+          items: { $ref: "#/components/schemas/ErrorDetail" }
+      additionalProperties: false
+
+    ErrorDetail:
+      type: object
+      description: Machine-readable detail; shape varies by `code`.
+      additionalProperties: true
+
+    GraphValidationIssue:
+      description: |
+        Semantic problems detected at publish time. Duplicate edge labels at
+        a node are deliberately not a member of `reason`: they are rejected
+        earlier, as a `400`, by a database unique constraint on
+        `(from_node_id, label)` when the draft graph is written — they never
+        reach publish-time validation.
+      type: object
+      required: [reason]
+      properties:
+        node_id: { type: string, format: uuid }
+        edge_id: { type: string, format: uuid }
+        reason:
+          type: string
+          enum:
+            - missing_root
+            - dangling_reference
+            - unreachable_from_root
+            - cycle_detected
+            - decision_node_without_edges
+            - terminal_node_with_edges
+            - terminal_node_missing_resolution
+            - decision_node_with_resolution
+
+    PublishValidationError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details:
+              type: array
+              items: { $ref: "#/components/schemas/GraphValidationIssue" }
+
+    # ---------------------------------------------------------------
+    # Playbook design
+    # ---------------------------------------------------------------
+    Playbook:
+      type: object
+      required: [id, name, alert_type, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        alert_type: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PlaybookVersionSummary:
+      type: object
+      required: [id, version, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: integer }
+        status: { $ref: "#/components/schemas/PlaybookVersionStatus" }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time, nullable: true }
+
+    PlaybookWithVersions:
+      allOf:
+        - $ref: "#/components/schemas/Playbook"
+        - type: object
+          required: [versions]
+          properties:
+            versions:
+              type: array
+              items: { $ref: "#/components/schemas/PlaybookVersionSummary" }
+
+    PlaybookVersionStatus:
+      type: string
+      enum: [draft, published, archived]
+
+    PlaybookNodeKind:
+      type: string
+      enum: [decision, terminal]
+
+    PlaybookNode:
+      type: object
+      required: [id, kind, title]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/PlaybookNodeKind" }
+        title: { type: string }
+        description: { type: string }
+        terminal_resolution:
+          type: string
+          nullable: true
+          description: Required iff kind = terminal.
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    PlaybookEdge:
+      type: object
+      required: [id, from_node_id, to_node_id, label]
+      properties:
+        id: { type: string, format: uuid }
+        from_node_id: { type: string, format: uuid }
+        to_node_id: { type: string, format: uuid }
+        label: { type: string, example: "Yes" }
+        description: { type: string, nullable: true }
+        sort_order: { type: integer, default: 0 }
+
+    PlaybookGraphInput:
+      description: |
+        Whole-graph replacement payload for a draft version. Nothing here is
+        required: a draft may legitimately have no nodes yet, or nodes but
+        no root chosen yet. Structural/semantic validity (root set, no
+        dangling references, every decision node has outgoing edges, full
+        reachability, acyclicity) is enforced only by
+        `POST /playbook-versions/{versionId}/publish`, never here — see
+        docs/domain-model.md §5.
+      type: object
+      properties:
+        root_node_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Must reference one of `nodes[].id` when set. May be null while the draft has no chosen root yet; required (non-null) to publish.
+        nodes:
+          type: array
+          default: []
+          items: { $ref: "#/components/schemas/PlaybookNode" }
+        edges:
+          type: array
+          default: []
+          items: { $ref: "#/components/schemas/PlaybookEdge" }
+
+    PlaybookVersionDefinition:
+      allOf:
+        - type: object
+          required: [id, playbook_id, version, status, created_at]
+          properties:
+            id: { type: string, format: uuid }
+            playbook_id: { type: string, format: uuid }
+            version: { type: integer }
+            status: { $ref: "#/components/schemas/PlaybookVersionStatus" }
+            created_at: { type: string, format: date-time }
+            published_at: { type: string, format: date-time, nullable: true }
+        - $ref: "#/components/schemas/PlaybookGraphInput"
+
+    CreatePlaybookRequest:
+      type: object
+      required: [name, alert_type]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        alert_type: { type: string }
+        definition:
+          type: object
+          description: Optional initial draft graph; an empty draft is created if omitted.
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/PlaybookGraphInput"
+
+    CreatePlaybookVersionRequest:
+      type: object
+      properties:
+        clone_from_version_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: If set, the new draft's graph is seeded from this version's graph.
+
+    # ---------------------------------------------------------------
+    # Alerts
+    # ---------------------------------------------------------------
+    Alert:
+      type: object
+      required: [id, alert_type, title, occurred_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        external_id: { type: string, nullable: true }
+        alert_type: { type: string }
+        title: { type: string }
+        description: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        occurred_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    CreateAlertRequest:
+      type: object
+      required: [alert_type, title, occurred_at]
+      properties:
+        external_id: { type: string, nullable: true }
+        alert_type: { type: string }
+        title: { type: string }
+        description: { type: string }
+        occurred_at: { type: string, format: date-time }
+        payload:
+          type: object
+          additionalProperties: true
+
+    # ---------------------------------------------------------------
+    # Investigations
+    # ---------------------------------------------------------------
+    InvestigationStatus:
+      type: string
+      enum: [in_progress, completed]
+
+    ActorType:
+      type: string
+      enum: [human, agent]
+
+    Actor:
+      type: object
+      required: [type]
+      properties:
+        type: { $ref: "#/components/schemas/ActorType" }
+        id: { type: string, nullable: true }
+
+    EvidenceItem:
+      type: object
+      required: [type, summary]
+      properties:
+        type: { type: string }
+        summary: { type: string }
+        data:
+          type: object
+          additionalProperties: true
+
+    AvailableChoice:
+      description: An edge selectable from the current node.
+      type: object
+      required: [edge_id, label, to_node_id]
+      properties:
+        edge_id: { type: string, format: uuid }
+        label: { type: string }
+        description: { type: string, nullable: true }
+        to_node_id: { type: string, format: uuid }
+
+    InvestigationStep:
+      description: |
+        Every step is a decision: exactly one edge selected from `node_id`.
+        There is no such thing as an evidence-only, non-advancing step (see
+        docs/domain-model.md §8) — a `terminal` root produces zero steps
+        rather than a step with no edge.
+      type: object
+      required: [id, sequence_number, node_id, selected_edge_id, actor, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        sequence_number: { type: integer }
+        node_id: { type: string, format: uuid }
+        selected_edge_id: { type: string, format: uuid }
+        actor: { $ref: "#/components/schemas/Actor" }
+        rationale: { type: string, nullable: true }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/EvidenceItem" }
+        created_at: { type: string, format: date-time }
+
+    StartInvestigationRequest:
+      type: object
+      required: [playbook_version_id]
+      properties:
+        playbook_version_id:
+          type: string
+          format: uuid
+          description: Must reference a `published` version.
+
+    SubmitDecisionRequest:
+      type: object
+      required: [edge_id, actor]
+      properties:
+        edge_id: { type: string, format: uuid }
+        actor: { $ref: "#/components/schemas/Actor" }
+        rationale: { type: string, nullable: true }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/EvidenceItem" }
+
+    InvestigationState:
+      description: |
+        What an agent/UI needs to decide its next action, self-contained:
+        includes the full alert (not just its ID) so a resumed agent call —
+        e.g. an LLM reasoning over gathered evidence — has the original
+        alert payload, current question, choices, and history from one
+        request, without a follow-up `GET /alerts/{alertId}`.
+      type: object
+      required: [id, alert, playbook_version_id, status, current_node, started_at]
+      properties:
+        id: { type: string, format: uuid }
+        alert: { $ref: "#/components/schemas/Alert" }
+        playbook_version_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/InvestigationStatus" }
+        current_node: { $ref: "#/components/schemas/PlaybookNode" }
+        available_choices:
+          description: Empty when status = completed.
+          type: array
+          items: { $ref: "#/components/schemas/AvailableChoice" }
+        final_resolution: { type: string, nullable: true }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/InvestigationStep" }
+
+    PathStep:
+      description: One entry in the ordered, investigation-specific path (distinct from the canonical graph).
+      type: object
+      required: [step_number, node_id, selected_edge_id, actor, created_at]
+      properties:
+        step_number: { type: integer }
+        node_id: { type: string, format: uuid }
+        selected_edge_id: { type: string, format: uuid }
+        actor: { $ref: "#/components/schemas/Actor" }
+        rationale: { type: string, nullable: true }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/EvidenceItem" }
+        created_at: { type: string, format: date-time }
+
+    InvestigationReport:
+      type: object
+      required: [investigation, alert, playbook_version, path]
+      properties:
+        investigation:
+          type: object
+          required: [id, status, started_at]
+          properties:
+            id: { type: string, format: uuid }
+            status: { $ref: "#/components/schemas/InvestigationStatus" }
+            final_resolution: { type: string, nullable: true }
+            started_at: { type: string, format: date-time }
+            completed_at: { type: string, format: date-time, nullable: true }
+        alert: { $ref: "#/components/schemas/Alert" }
+        playbook_version: { $ref: "#/components/schemas/PlaybookVersionDefinition" }
+        path:
+          type: array
+          items: { $ref: "#/components/schemas/PathStep" }

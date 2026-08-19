@@ -1,0 +1,17 @@
+# Build output
+/bin/
+/out/
+
+# Local environment overrides — never commit credentials.
+.env
+.env.local
+
+# OS / editor noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Test artifacts
+*.test
+coverage.out

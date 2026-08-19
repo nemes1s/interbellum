@@ -1,0 +1,59 @@
+# Local development / review environment.
+#
+#   docker compose up --build
+#
+# brings up PostgreSQL and the API. The API applies database migrations itself
+# at startup (RUN_MIGRATIONS=true) and logs what it applied — there is no
+# migration sidecar and no startup script to read. See docs/architecture.md for
+# why production usually separates migrations into their own deployment step.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: indurex
+      POSTGRES_PASSWORD: indurex
+      POSTGRES_DB: indurex
+    ports:
+      # Exposed so the integration test suite (make test-integration) and psql
+      # can reach the same database from the host.
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # The API waits for this: starting it against a database still running
+      # its own initdb would just crash-loop it.
+      test: ["CMD-SHELL", "pg_isready -U indurex -d indurex"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # These are local development credentials, not secrets. A real
+      # deployment injects DATABASE_URL from a secret store — see the README.
+      DATABASE_URL: postgres://indurex:indurex@db:5432/indurex?sslmode=disable
+      HTTP_ADDR: ":8080"
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      RUN_MIGRATIONS: "true"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # /readyz rather than /healthz: this reports whether the instance can
+      # actually serve requests, which is what "up" should mean here.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  db-data:
