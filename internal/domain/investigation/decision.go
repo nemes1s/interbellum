@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // Start computes the initial state of an investigation against a published

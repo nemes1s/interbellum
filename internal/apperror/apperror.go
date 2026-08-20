@@ -1,17 +1,24 @@
-// Package apperror defines the single error type crossing service/HTTP
-// boundaries, and its mapping to HTTP status codes.
+// Package apperror defines the single error type that crosses layer
+// boundaries, and the stable code vocabulary that goes with it.
 //
-// Domain and service code returns *apperror.Error (usually via one of the
-// constructors below); the HTTP layer is the only place that turns it into a
-// status code and body. Raw database errors never reach a client: the
-// repository layer translates the ones it understands (unique violations, FK
-// violations) into domain codes and wraps anything else as ErrInternal.
+// It depends on nothing but the standard library's errors and fmt — in
+// particular it does NOT import net/http. The mapping from Code to HTTP status
+// lives in internal/http, because that is a transport concern: a code means
+// "the investigation is already completed", and only the HTTP layer decides
+// that this is a 409. Keeping the mapping out of here is what lets
+// internal/domain use these codes while still having no transport dependency,
+// direct or transitive.
+//
+// Domain, service and repository code returns *apperror.Error; the HTTP layer
+// is the only place that turns it into a status code and body. Raw database
+// errors never reach a client: the repository layer translates the ones it
+// understands (unique violations, FK violations) into codes and wraps anything
+// else as CodeInternal.
 package apperror
 
 import (
 	"errors"
 	"fmt"
-	"net/http"
 )
 
 // Code is a stable, machine-readable error identifier. Clients (including
@@ -39,6 +46,9 @@ const (
 	CodeInvalidTransition Code = "INVALID_TRANSITION"
 	// CodeIdempotencyKeyReused — same key, different request body. 409.
 	CodeIdempotencyKeyReused Code = "IDEMPOTENCY_KEY_REUSED"
+	// CodeAlertTypeMismatch — the playbook is registered for a different
+	// alert_type than the alert being investigated. 409.
+	CodeAlertTypeMismatch Code = "ALERT_TYPE_MISMATCH"
 	// CodeMethodNotAllowed — the path exists but not for this HTTP method. 405.
 	CodeMethodNotAllowed Code = "METHOD_NOT_ALLOWED"
 	// CodePayloadTooLarge — request body exceeded the configured limit. 413.
@@ -107,34 +117,6 @@ func Internal(cause error) *Error {
 		Code:    CodeInternal,
 		Message: "internal server error",
 		cause:   cause,
-	}
-}
-
-// HTTPStatus maps a code to its HTTP status. Unknown codes are treated as 500,
-// which is the safe default for an error we forgot to classify.
-func (e *Error) HTTPStatus() int {
-	switch e.Code {
-	case CodeBadRequest, CodeValidationFailed:
-		return http.StatusBadRequest
-	case CodeNotFound:
-		return http.StatusNotFound
-	case CodeConflict,
-		CodeVersionNotDraft,
-		CodeVersionNotPublished,
-		CodeInvestigationCompleted,
-		CodeInvalidTransition,
-		CodeIdempotencyKeyReused:
-		return http.StatusConflict
-	case CodeMethodNotAllowed:
-		return http.StatusMethodNotAllowed
-	case CodeInvalidPlaybookGraph:
-		return http.StatusUnprocessableEntity
-	case CodePayloadTooLarge:
-		return http.StatusRequestEntityTooLarge
-	case CodeNotReady:
-		return http.StatusServiceUnavailable
-	default:
-		return http.StatusInternalServerError
 	}
 }
 

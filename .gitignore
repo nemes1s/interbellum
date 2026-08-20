@@ -11,6 +11,7 @@
 *.swp
 .idea/
 .vscode/
+.claude/
 
 # Test artifacts
 *.test

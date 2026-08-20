@@ -13,12 +13,19 @@ type Repository interface {
 	// investigation is born completed is a domain decision, not a storage one.
 	Create(ctx context.Context, inv Investigation) (Investigation, error)
 
-	// Get returns an investigation by ID, or apperror.CodeNotFound.
-	Get(ctx context.Context, id uuid.UUID) (Investigation, error)
-
-	// Steps returns the append-only audit trail in sequence order. This — not
-	// Investigation.CurrentNodeID — is the authoritative history.
-	Steps(ctx context.Context, investigationID uuid.UUID) ([]Step, error)
+	// GetWithSteps returns an investigation together with its append-only audit
+	// trail in sequence order, read from a single database snapshot.
+	//
+	// The two are returned together, rather than as separate calls, because a
+	// concurrent decision commits between them otherwise: a caller could read
+	// the investigation at node A, then read a step list that already contains
+	// the A->B transition, and report a current node its own history
+	// contradicts. Nothing is corrupted by that — a stale decision is still
+	// rejected on submission — but it is a confusing thing to hand an agent
+	// that is deciding what to do next.
+	//
+	// The steps, not Investigation.CurrentNodeID, are the authoritative history.
+	GetWithSteps(ctx context.Context, id uuid.UUID) (Investigation, []Step, error)
 
 	// ApplyDecision advances an investigation by one edge, atomically.
 	//

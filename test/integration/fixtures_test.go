@@ -3,7 +3,7 @@ package integration
 import (
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // newForkPlaybook builds the minimal branching graph used by the concurrency

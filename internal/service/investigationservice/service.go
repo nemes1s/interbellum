@@ -9,16 +9,15 @@ package investigationservice
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/alert"
-	"github.com/indurex/interbellum/internal/domain/investigation"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/alert"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // Service exposes the investigation use cases to the HTTP layer.
@@ -90,6 +89,31 @@ func (s *Service) Start(ctx context.Context, in StartInput) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+
+	// The playbook must be registered for this alert's type.
+	//
+	// This is a deliberate position rather than an oversight: without it,
+	// alert_type would be decorative — a label nothing enforces — and a caller
+	// could run the PLC-register-write procedure against a failed-login alert,
+	// producing an audit record whose questions never applied to the alert
+	// they were asked about. Requiring the match is what gives alert_type
+	// semantic weight in v1.
+	//
+	// The cost is that a deliberately generic "triage anything" playbook is
+	// not expressible today. If that becomes wanted, the clean extension is an
+	// explicit opt-out on the playbook (a wildcard alert_type, or an
+	// `applies_to_any_alert_type` flag) rather than dropping the check — see
+	// README "Key decisions".
+	owner, _, err := s.playbooks.Get(ctx, definition.Version.PlaybookID)
+	if err != nil {
+		return State{}, err
+	}
+	if owner.AlertType != alertRecord.AlertType {
+		return State{}, apperror.Conflict(apperror.CodeAlertTypeMismatch,
+			"playbook version %s handles alert_type %q, but alert %s is of type %q",
+			in.PlaybookVersionID, owner.AlertType, alertRecord.ID, alertRecord.AlertType)
+	}
+
 	// Resolve the root node. A draft is allowed to have no root at all, so the
 	// "not published" rule is reported first — otherwise pointing an
 	// investigation at an empty draft would complain about a missing root
@@ -144,11 +168,11 @@ func (s *Service) Start(ctx context.Context, in StartInput) (State, error) {
 
 // Get returns the current state of an investigation.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (State, error) {
-	inv, err := s.investigations.Get(ctx, id)
+	inv, steps, err := s.investigations.GetWithSteps(ctx, id)
 	if err != nil {
 		return State{}, err
 	}
-	return s.buildState(ctx, inv)
+	return s.buildState(ctx, inv, steps)
 }
 
 // SubmitDecision advances an investigation along the selected edge.
@@ -169,8 +193,8 @@ func (s *Service) SubmitDecision(
 	if in.EdgeID == uuid.Nil {
 		return State{}, apperror.Validation("edge_id is required")
 	}
-	if len(in.Evidence) > 0 && !json.Valid(in.Evidence) {
-		return State{}, apperror.BadRequest("evidence must be valid JSON")
+	if err := investigation.ValidateEvidence(in.Evidence); err != nil {
+		return State{}, err
 	}
 
 	result, err := s.investigations.ApplyDecision(ctx, investigationID, in)
@@ -203,12 +227,21 @@ func (s *Service) SubmitDecision(
 		}
 	}
 
-	return s.buildState(ctx, result.Investigation)
+	// Re-read rather than reporting result.Investigation directly: another
+	// agent may have advanced the investigation further in the meantime, and
+	// the caller is better served by a current, self-consistent snapshot than
+	// by a view that was accurate only at commit time. This is also what the
+	// idempotency contract promises for a replayed key.
+	return s.Get(ctx, investigationID)
 }
 
 // Report returns the complete audit record.
 func (s *Service) Report(ctx context.Context, id uuid.UUID) (Report, error) {
-	inv, err := s.investigations.Get(ctx, id)
+	// The path comes from the step records, never from current_node_id: the
+	// steps are the authoritative history, the pointer is only a projection.
+	// Both are read from one snapshot so a report can never show a resolution
+	// its own path does not reach.
+	inv, steps, err := s.investigations.GetWithSteps(ctx, id)
 	if err != nil {
 		return Report{}, err
 	}
@@ -223,13 +256,6 @@ func (s *Service) Report(ctx context.Context, id uuid.UUID) (Report, error) {
 		return Report{}, err
 	}
 
-	// The path comes from the step records, never from current_node_id: the
-	// steps are the authoritative history, the pointer is only a projection.
-	steps, err := s.investigations.Steps(ctx, inv.ID)
-	if err != nil {
-		return Report{}, err
-	}
-
 	return Report{
 		Investigation: inv,
 		Alert:         alertRecord,
@@ -240,7 +266,11 @@ func (s *Service) Report(ctx context.Context, id uuid.UUID) (Report, error) {
 
 // buildState assembles the current-state view shared by Get, Start's result
 // after a decision, and SubmitDecision.
-func (s *Service) buildState(ctx context.Context, inv investigation.Investigation) (State, error) {
+func (s *Service) buildState(
+	ctx context.Context,
+	inv investigation.Investigation,
+	steps []investigation.Step,
+) (State, error) {
 	alertRecord, err := s.alerts.Get(ctx, inv.AlertID)
 	if err != nil {
 		return State{}, err
@@ -260,11 +290,6 @@ func (s *Service) buildState(ctx context.Context, inv investigation.Investigatio
 		return State{}, apperror.Internal(apperror.New(apperror.CodeInternal,
 			"investigation %s points at node %s, which is not in playbook version %s",
 			inv.ID, inv.CurrentNodeID, inv.PlaybookVersionID))
-	}
-
-	steps, err := s.investigations.Steps(ctx, inv.ID)
-	if err != nil {
-		return State{}, err
 	}
 
 	return State{

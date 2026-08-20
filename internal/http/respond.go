@@ -15,7 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/apperror"
 )
 
 // errorBody is the machine-readable error envelope every failing endpoint
@@ -48,7 +48,7 @@ func writeJSON(w http.ResponseWriter, log *slog.Logger, status int, payload any)
 // fixed opaque message while the underlying cause goes to the log.
 func writeError(ctx context.Context, w http.ResponseWriter, log *slog.Logger, err error) {
 	appErr := apperror.From(err)
-	status := appErr.HTTPStatus()
+	status := statusFor(appErr.Code)
 
 	if status >= http.StatusInternalServerError {
 		log.ErrorContext(ctx, "request failed",

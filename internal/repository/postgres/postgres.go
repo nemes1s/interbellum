@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/indurex/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/apperror"
 )
 
 // PostgreSQL error codes we handle explicitly. Everything else becomes an
@@ -113,6 +113,13 @@ func translate(err error) error {
 			// Two decisions raced past the row lock — should be impossible.
 			return apperror.Conflict(apperror.CodeConflict,
 				"a concurrent decision was applied to this investigation; retry").WithCause(err)
+		case "playbook_nodes_pkey", "playbook_edges_pkey":
+			// Client-supplied graph IDs collided with rows that already exist,
+			// almost always because a fixture with hard-coded UUIDs was posted
+			// twice into the same database.
+			return apperror.Validation(
+				"a node or edge id in this graph already exists; graph ids are " +
+					"client-supplied and must be unique across playbooks").WithCause(err)
 		case "playbook_versions_playbook_id_version_key":
 			return apperror.Conflict(apperror.CodeConflict,
 				"a concurrent request created this playbook version; retry").WithCause(err)

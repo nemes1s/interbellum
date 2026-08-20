@@ -11,7 +11,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 
-	"github.com/indurex/interbellum/migrations"
+	"github.com/nemes1s/interbellum/migrations"
 )
 
 // Migrate applies all pending migrations from the embedded migrations

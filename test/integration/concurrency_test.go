@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
 )
 
 // TestConcurrentDecisionsSerialize is the concurrency guarantee: two agents
@@ -82,7 +82,7 @@ func TestConcurrentDecisionsSerialize(t *testing.T) {
 
 	// The audit trail proves it: exactly one step, and the investigation moved
 	// exactly once.
-	steps, err := repos.investigations.Steps(ctx(), inv.ID)
+	_, steps, err := repos.investigations.GetWithSteps(ctx(), inv.ID)
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}
@@ -117,9 +117,11 @@ func TestConcurrentIdenticalRetriesWithIdempotencyKeyApplyOnce(t *testing.T) {
 
 	key := "retry-" + uuid.NewString()
 	input := investigation.DecisionInput{
-		EdgeID:         edgeYes,
-		Actor:          investigation.Actor{Type: investigation.ActorAgent},
-		Evidence:       []byte(`[{"type":"note","summary":"same request"}]`),
+		EdgeID: edgeYes,
+		Actor:  investigation.Actor{Type: investigation.ActorAgent},
+		Evidence: []investigation.EvidenceItem{
+			{Type: "note", Summary: "same request"},
+		},
 		IdempotencyKey: &key,
 	}
 
@@ -148,7 +150,7 @@ func TestConcurrentIdenticalRetriesWithIdempotencyKeyApplyOnce(t *testing.T) {
 		}
 	}
 
-	steps, err := repos.investigations.Steps(ctx(), inv.ID)
+	_, steps, err := repos.investigations.GetWithSteps(ctx(), inv.ID)
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}

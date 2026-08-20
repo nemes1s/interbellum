@@ -9,9 +9,12 @@ package investigation
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/nemes1s/interbellum/internal/apperror"
 )
 
 // Status is the investigation lifecycle: in_progress -> completed.
@@ -70,22 +73,54 @@ type Step struct {
 	SelectedEdgeID    uuid.UUID
 	Actor             Actor
 	Rationale         *string
-	// Evidence is a JSON array of evidence items, opaque to the engine beyond
-	// being valid JSON. See EvidenceItem for the conventional shape.
-	Evidence       []byte
+	// Evidence is the list of items gathered at this step. Stored as a JSONB
+	// array; see EvidenceItem.
+	Evidence       []EvidenceItem
 	IdempotencyKey *string
 	CreatedAt      time.Time
 }
 
-// EvidenceItem documents the conventional evidence shape. It is not persisted
-// as a table: evidence is stored as a JSONB array on the step, because
+// EvidenceItem is one piece of evidence gathered while making a decision.
+//
+// It is not a table: evidence is stored as a JSONB array on the step, because
 // producers (humans, automation, other security systems, an LLM tool call)
 // disagree about everything except roughly "what kind, one-line summary,
-// arbitrary detail".
+// arbitrary detail". But the outer shape *is* enforced — this is the contract
+// api/openapi.yaml publishes, and an audit trail whose evidence could be the
+// number 123 would not be worth much to the auditor reading it.
+//
+// Data stays deliberately opaque: the engine never interprets it. The HTTP
+// layer constrains it to a JSON object, which is what the API contract
+// promises; nothing here looks inside.
 type EvidenceItem struct {
 	Type    string          `json:"type"`
 	Summary string          `json:"summary"`
 	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+// Validate enforces the fields the API contract marks required. Producers vary
+// wildly in what they put in Data, but every item must at least say what kind
+// of evidence it is and summarise itself in one line, or a report cannot render
+// a readable timeline.
+func (e EvidenceItem) Validate() error {
+	if strings.TrimSpace(e.Type) == "" {
+		return apperror.Validation("evidence item is missing required field \"type\"")
+	}
+	if strings.TrimSpace(e.Summary) == "" {
+		return apperror.Validation("evidence item %q is missing required field \"summary\"", e.Type)
+	}
+	return nil
+}
+
+// ValidateEvidence checks every item, naming the offending index so a client
+// can find it in the array it sent.
+func ValidateEvidence(items []EvidenceItem) error {
+	for i, item := range items {
+		if err := item.Validate(); err != nil {
+			return apperror.Validation("evidence[%d]: %s", i, apperror.From(err).Message)
+		}
+	}
+	return nil
 }
 
 // DecisionInput is a request to advance an investigation by one edge.
@@ -93,7 +128,7 @@ type DecisionInput struct {
 	EdgeID    uuid.UUID
 	Actor     Actor
 	Rationale *string
-	Evidence  []byte
+	Evidence  []EvidenceItem
 	// IdempotencyKey, when set, makes a retry of the identical request a no-op
 	// instead of a second step. Unique per investigation.
 	IdempotencyKey *string

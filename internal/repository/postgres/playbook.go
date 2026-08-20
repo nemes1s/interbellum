@@ -7,8 +7,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // PlaybookRepository implements playbook.Repository against PostgreSQL.
@@ -122,14 +122,47 @@ func (r *PlaybookRepository) CreateVersion(ctx context.Context, playbookID uuid.
 	var def playbook.Definition
 
 	err := inTx(ctx, r.pool, func(tx pgx.Tx) error {
-		// Lock the parent playbook row so two concurrent version creations
-		// cannot compute the same next version number. The unique constraint
-		// on (playbook_id, version) would catch it anyway, but a lock turns a
+		// LOCK ORDERING — version first, then playbook. Do not reorder.
+		//
+		// Every other write path takes its locks in that order, though only
+		// the first is explicit: ReplaceGraph and Publish lock the version row
+		// FOR UPDATE, and their subsequent UPDATE of playbook_versions
+		// re-checks the playbook_id foreign key, which quietly takes FOR KEY
+		// SHARE on the parent playbooks row. Locking the playbook first here
+		// and the source version second produces a genuine deadlock against a
+		// concurrent ReplaceGraph, observed as SQLSTATE 40P01.
+		var source playbook.Definition
+		if cloneFrom != nil {
+			// FOR SHARE, not FOR UPDATE: this transaction only reads the
+			// source. The lock is still required, because loading a definition
+			// takes three statements (version/root, nodes, edges) and under
+			// PostgreSQL's default READ COMMITTED each one gets its own
+			// snapshot — a ReplaceGraph committing midway would otherwise leave
+			// the clone holding the old root together with the new graph.
+			if _, err := lockVersionShared(ctx, tx, *cloneFrom); err != nil {
+				return err
+			}
+
+			loaded, err := loadDefinition(ctx, tx, *cloneFrom)
+			if err != nil {
+				return err
+			}
+			source = loaded
+		}
+
+		// Lock the parent playbook so two concurrent version creations cannot
+		// compute the same next version number. The unique constraint on
+		// (playbook_id, version) would catch it anyway, but a lock turns a
 		// retryable conflict into a wait.
 		var exists bool
-		err := tx.QueryRow(ctx, `SELECT true FROM playbooks WHERE id = $1 FOR UPDATE`, playbookID).Scan(&exists)
-		if err != nil {
+		if err := tx.QueryRow(ctx,
+			`SELECT true FROM playbooks WHERE id = $1 FOR UPDATE`, playbookID).Scan(&exists); err != nil {
 			return notFound(err, "playbook")
+		}
+
+		if cloneFrom != nil && source.Version.PlaybookID != playbookID {
+			return apperror.Validation(
+				"clone_from_version_id %s belongs to a different playbook", *cloneFrom)
 		}
 
 		var nextVersion int
@@ -145,14 +178,6 @@ func (r *PlaybookRepository) CreateVersion(ctx context.Context, playbookID uuid.
 		}
 
 		if cloneFrom != nil {
-			source, err := loadDefinition(ctx, tx, *cloneFrom)
-			if err != nil {
-				return err
-			}
-			if source.Version.PlaybookID != playbookID {
-				return apperror.Validation(
-					"clone_from_version_id %s belongs to a different playbook", *cloneFrom)
-			}
 			// Clone structurally with fresh IDs: the two versions must never
 			// share node/edge rows, or editing the draft would mutate the
 			// published version's graph.
@@ -288,6 +313,22 @@ func insertVersion(ctx context.Context, tx pgx.Tx, playbookID uuid.UUID, number 
 	return scanVersion(row)
 }
 
+// lockVersionShared reads a version FOR SHARE, keeping writers out for the
+// duration of a multi-statement read without blocking other readers.
+func lockVersionShared(ctx context.Context, tx pgx.Tx, versionID uuid.UUID) (playbook.Version, error) {
+	row := tx.QueryRow(ctx, `
+		SELECT id, playbook_id, version, status, root_node_id, created_at, published_at
+		FROM playbook_versions
+		WHERE id = $1
+		FOR SHARE`, versionID)
+
+	v, err := scanVersion(row)
+	if err != nil {
+		return playbook.Version{}, notFound(err, "playbook version")
+	}
+	return v, nil
+}
+
 // lockVersion reads a version FOR UPDATE, serializing edits and publishes of
 // the same version against each other.
 func lockVersion(ctx context.Context, tx pgx.Tx, versionID uuid.UUID) (playbook.Version, error) {
@@ -321,25 +362,37 @@ func clearGraph(ctx context.Context, tx pgx.Tx, versionID uuid.UUID) error {
 
 // writeGraph inserts nodes, then edges, then sets the root — the order the
 // foreign keys require.
+//
+// Nodes and edges go out as two pipelined batches rather than one round trip
+// per row: a realistic playbook is tens of nodes, but nothing in the model
+// caps it, and a 500-node graph would otherwise be a thousand sequential round
+// trips inside an open transaction. The two batches stay separate because
+// every edge's foreign key requires its endpoints to exist already.
 func writeGraph(ctx context.Context, tx pgx.Tx, versionID uuid.UUID, g playbook.Graph) error {
-	for _, n := range g.Nodes {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO playbook_nodes
-				(id, playbook_version_id, kind, title, description, terminal_resolution, metadata)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			n.ID, versionID, string(n.Kind), n.Title, n.Description, n.TerminalResolution, n.Metadata,
-		); err != nil {
+	if len(g.Nodes) > 0 {
+		batch := &pgx.Batch{}
+		for _, n := range g.Nodes {
+			batch.Queue(`
+				INSERT INTO playbook_nodes
+					(id, playbook_version_id, kind, title, description, terminal_resolution, metadata)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				n.ID, versionID, string(n.Kind), n.Title, n.Description, n.TerminalResolution, n.Metadata)
+		}
+		if err := execBatch(ctx, tx, batch); err != nil {
 			return err
 		}
 	}
 
-	for _, e := range g.Edges {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO playbook_edges
-				(id, playbook_version_id, from_node_id, to_node_id, label, description, sort_order)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			e.ID, versionID, e.FromNodeID, e.ToNodeID, e.Label, e.Description, e.SortOrder,
-		); err != nil {
+	if len(g.Edges) > 0 {
+		batch := &pgx.Batch{}
+		for _, e := range g.Edges {
+			batch.Queue(`
+				INSERT INTO playbook_edges
+					(id, playbook_version_id, from_node_id, to_node_id, label, description, sort_order)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				e.ID, versionID, e.FromNodeID, e.ToNodeID, e.Label, e.Description, e.SortOrder)
+		}
+		if err := execBatch(ctx, tx, batch); err != nil {
 			return err
 		}
 	}
@@ -352,6 +405,24 @@ func writeGraph(ctx context.Context, tx pgx.Tx, versionID uuid.UUID, g playbook.
 		}
 	}
 	return nil
+}
+
+// execBatch runs every queued statement and returns the first failure.
+//
+// The batch results must be fully drained and closed before the transaction
+// issues anything else on the same connection, so the close error is reported
+// too — a constraint violation on one queued row surfaces there.
+func execBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch) error {
+	results := tx.SendBatch(ctx, batch)
+	for range batch.Len() {
+		if _, err := results.Exec(); err != nil {
+			// Close before returning: leaving results open would poison the
+			// connection for the rest of the transaction.
+			_ = results.Close()
+			return err
+		}
+	}
+	return results.Close()
 }
 
 func loadDefinition(ctx context.Context, q querier, versionID uuid.UUID) (playbook.Definition, error) {

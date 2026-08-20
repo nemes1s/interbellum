@@ -13,13 +13,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/indurex/interbellum/internal/config"
-	httpapi "github.com/indurex/interbellum/internal/http"
-	"github.com/indurex/interbellum/internal/logging"
-	"github.com/indurex/interbellum/internal/repository/postgres"
-	"github.com/indurex/interbellum/internal/service/alertservice"
-	"github.com/indurex/interbellum/internal/service/investigationservice"
-	"github.com/indurex/interbellum/internal/service/playbookservice"
+	"github.com/nemes1s/interbellum/internal/config"
+	httpapi "github.com/nemes1s/interbellum/internal/http"
+	"github.com/nemes1s/interbellum/internal/logging"
+	"github.com/nemes1s/interbellum/internal/repository/postgres"
+	"github.com/nemes1s/interbellum/internal/service/alertservice"
+	"github.com/nemes1s/interbellum/internal/service/investigationservice"
+	"github.com/nemes1s/interbellum/internal/service/playbookservice"
 )
 
 func main() {

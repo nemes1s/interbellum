@@ -307,7 +307,12 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: Referenced playbook version is not published.
+          description: |
+            The referenced playbook version is not published
+            (`PLAYBOOK_VERSION_NOT_PUBLISHED`), or the playbook is registered
+            for a different `alert_type` than this alert
+            (`ALERT_TYPE_MISMATCH`) — a playbook only runs against the kind of
+            alert it was written for. See README "Key decisions".
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -584,6 +589,10 @@ components:
           nullable: true
           description: Required iff kind = terminal.
         metadata:
+          description: |
+            Designer-defined hints, opaque to the engine (e.g. which evidence
+            an agent might gather at this node). Must be a JSON object when
+            present — a scalar or array is rejected with `400`.
           type: object
           nullable: true
           additionalProperties: true
@@ -673,6 +682,7 @@ components:
         title: { type: string }
         description: { type: string }
         payload:
+          description: Domain-specific data, opaque to the engine. Must be a JSON object.
           type: object
           additionalProperties: true
         occurred_at: { type: string, format: date-time }
@@ -688,6 +698,9 @@ components:
         description: { type: string }
         occurred_at: { type: string, format: date-time }
         payload:
+          description: |
+            Domain-specific data, opaque to the engine. Must be a JSON object —
+            a scalar or array is rejected with `400`.
           type: object
           additionalProperties: true
 
@@ -710,11 +723,22 @@ components:
         id: { type: string, nullable: true }
 
     EvidenceItem:
+      description: |
+        One piece of evidence gathered while making a decision. `type` and
+        `summary` are required and must be non-blank: a report renders a
+        timeline from them, so an item that says neither what kind of evidence
+        it is nor what it found is not useful to an auditor. `data` is an
+        arbitrary JSON **object** the engine never interprets.
+
+        These constraints are enforced, not merely documented: a request whose
+        `evidence` is a scalar, an object, an array of scalars, or an array of
+        items missing `type`/`summary` is rejected with `400`.
       type: object
       required: [type, summary]
+      additionalProperties: false
       properties:
-        type: { type: string }
-        summary: { type: string }
+        type: { type: string, minLength: 1, example: asset_inventory_lookup }
+        summary: { type: string, minLength: 1, example: "10.20.1.44 maps to ENG-WS-14" }
         data:
           type: object
           additionalProperties: true

@@ -44,11 +44,19 @@ request() {
   echo "$payload"
 }
 
+# The committed fixture uses fixed UUIDs so that documentation can refer to
+# specific node and edge ids. Those ids are primary keys, though, so posting
+# the fixture verbatim twice into one database collides. Freshening the last
+# six hex digits of every id keeps the fixture readable while letting this
+# script run repeatedly against the same database.
+RUN_ID=$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
+freshen() { sed "s/-000000\([0-9a-f]\{6\}\)/-${RUN_ID}\1/g" "$1"; }
+
 step "Checking the API is reachable"
 request GET /readyz 200 | jq -c .
 
 step "1. Creating the example playbook (draft)"
-PLAYBOOK=$(request POST /api/v1/playbooks 201 "$(cat "$FIXTURES/example-playbook.json")")
+PLAYBOOK=$(request POST /api/v1/playbooks 201 "$(freshen "$FIXTURES/example-playbook.json")")
 PLAYBOOK_ID=$(jq -r '.id' <<<"$PLAYBOOK")
 VERSION_ID=$(jq -r '.versions[0].id' <<<"$PLAYBOOK")
 echo "playbook_id=$PLAYBOOK_ID"
@@ -59,7 +67,10 @@ request POST "/api/v1/playbook-versions/$VERSION_ID/publish" 200 \
   | jq -c '{id, version, status, published_at, nodes: (.nodes|length), edges: (.edges|length)}'
 
 step "3. Ingesting the alert"
-ALERT=$(request POST /api/v1/alerts 201 "$(cat "$FIXTURES/example-alert.json")")
+# external_id is unique and ingestion is idempotent on it, so a fresh one per
+# run keeps this a creation (201) rather than a replay (200).
+ALERT_BODY=$(jq --arg run "$RUN_ID" '.external_id += "-" + $run' "$FIXTURES/example-alert.json")
+ALERT=$(request POST /api/v1/alerts 201 "$ALERT_BODY")
 ALERT_ID=$(jq -r '.id' <<<"$ALERT")
 echo "alert_id=$ALERT_ID"
 

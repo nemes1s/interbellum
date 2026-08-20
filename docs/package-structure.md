@@ -161,5 +161,26 @@ http  ─▶  service  ─▶  domain  ◀─  repository/postgres
 cmd/server ─▶ (all of the above, for wiring)
 ```
 
-`domain` is the only package with no outgoing dependency on another internal
-package, which is what makes it independently unit-testable.
+`domain` depends on exactly one other internal package, `apperror`, and on
+nothing else — no `pgx`, no `chi`, no `net/http`, not even transitively.
+
+`apperror` is deliberately not a layer in that diagram: it is a shared
+*vocabulary* rather than a dependency in the architectural sense. It defines
+the error type and the stable code constants (`INVALID_TRANSITION`,
+`PLAYBOOK_VERSION_NOT_DRAFT`, …) that every layer speaks, and it imports only
+`errors` and `fmt` from the standard library. The mapping from those codes to
+HTTP statuses lives in `internal/http/status.go`, not with the codes
+themselves, precisely so that this stays true: a code means "the investigation
+is already completed", and only the transport layer decides that this is a 409.
+
+That is what keeps the domain independently unit-testable — and it is checked,
+not just asserted:
+
+```console
+$ go list -deps ./internal/domain/... | grep -x net/http   # no output
+```
+
+The alternative, a separate error type per layer with translation at each
+boundary, was rejected as ceremony: there is one error contract in this
+system, and duplicating it three times to preserve a diagram would make the
+code worse, not cleaner.

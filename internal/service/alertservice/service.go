@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/alert"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/alert"
 )
 
 // Service exposes the alert use cases to the HTTP layer.
@@ -42,6 +42,9 @@ func (s *Service) Create(ctx context.Context, in alert.New) (alert.Alert, bool, 
 		// non-null values) and silently disable idempotency for that caller.
 		return alert.Alert{}, false, apperror.Validation("external_id must not be empty when provided")
 	}
+	// The HTTP layer decodes payload through a JSON object, so a non-object
+	// cannot reach here. This guards the service against a future non-HTTP
+	// caller rather than against the API.
 	if len(in.Payload) > 0 && !json.Valid(in.Payload) {
 		return alert.Alert{}, false, apperror.BadRequest("payload must be valid JSON")
 	}

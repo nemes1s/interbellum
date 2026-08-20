@@ -5,7 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/apperror"
 )
 
 // IssueReason enumerates the semantic problems publish-time validation can

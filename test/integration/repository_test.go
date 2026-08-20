@@ -8,10 +8,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/alert"
-	"github.com/indurex/interbellum/internal/domain/investigation"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/alert"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // These tests drive the repositories directly. They exist to cover the things
@@ -219,7 +219,9 @@ func TestInvestigationStepsAreOrderedAndAppendOnly(t *testing.T) {
 		EdgeID:    edgeID,
 		Actor:     investigation.Actor{Type: investigation.ActorAgent},
 		Rationale: &rationale,
-		Evidence:  []byte(`[{"type":"note","summary":"ok"}]`),
+		Evidence: []investigation.EvidenceItem{
+			{Type: "note", Summary: "ok", Data: []byte(`{"checked":true}`)},
+		},
 	})
 	if err != nil {
 		t.Fatalf("apply decision: %v", err)
@@ -234,7 +236,7 @@ func TestInvestigationStepsAreOrderedAndAppendOnly(t *testing.T) {
 		t.Fatalf("final resolution not copied from the terminal node")
 	}
 
-	steps, err := repos.investigations.Steps(ctx(), inv.ID)
+	_, steps, err := repos.investigations.GetWithSteps(ctx(), inv.ID)
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}
@@ -244,8 +246,14 @@ func TestInvestigationStepsAreOrderedAndAppendOnly(t *testing.T) {
 	if steps[0].Rationale == nil || *steps[0].Rationale != rationale {
 		t.Fatalf("rationale did not persist")
 	}
-	if len(steps[0].Evidence) == 0 {
-		t.Fatalf("evidence did not persist")
+	if len(steps[0].Evidence) != 1 {
+		t.Fatalf("evidence did not persist: %+v", steps[0].Evidence)
+	}
+	if steps[0].Evidence[0].Type != "note" || steps[0].Evidence[0].Summary != "ok" {
+		t.Fatalf("evidence fields did not round-trip: %+v", steps[0].Evidence[0])
+	}
+	if string(steps[0].Evidence[0].Data) != `{"checked": true}` {
+		t.Fatalf("evidence data did not round-trip: %s", steps[0].Evidence[0].Data)
 	}
 	// The step records the node it was made *from*, not the destination —
 	// that is what makes the path reconstructable.
@@ -380,7 +388,7 @@ func TestGetMissingResourcesReturnsNotFound(t *testing.T) {
 	if _, err := repos.alerts.Get(ctx(), uuid.New()); !apperror.IsCode(err, apperror.CodeNotFound) {
 		t.Fatalf("alert: got %v, want RESOURCE_NOT_FOUND", err)
 	}
-	if _, err := repos.investigations.Get(ctx(), uuid.New()); !apperror.IsCode(err, apperror.CodeNotFound) {
+	if _, _, err := repos.investigations.GetWithSteps(ctx(), uuid.New()); !apperror.IsCode(err, apperror.CodeNotFound) {
 		t.Fatalf("investigation: got %v, want RESOURCE_NOT_FOUND", err)
 	}
 

@@ -2,13 +2,15 @@ package httpdto
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/domain/alert"
-	"github.com/indurex/interbellum/internal/domain/investigation"
-	"github.com/indurex/interbellum/internal/service/investigationservice"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/alert"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/service/investigationservice"
 )
 
 // Alert mirrors the Alert schema.
@@ -24,13 +26,29 @@ type Alert struct {
 }
 
 // CreateAlertRequest mirrors the CreateAlertRequest schema.
+//
+// Payload decodes into a map rather than json.RawMessage so that the object
+// shape the OpenAPI document promises is enforced by the decoder itself: a
+// scalar or an array fails with a 400 instead of being stored and later
+// returned from an endpoint whose schema says "object". Nothing is lost by
+// decoding through a map — JSONB normalizes key order and whitespace anyway,
+// so the bytes were never preserved verbatim to begin with.
 type CreateAlertRequest struct {
-	ExternalID  *string         `json:"external_id"`
-	AlertType   string          `json:"alert_type"`
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	OccurredAt  time.Time       `json:"occurred_at"`
-	Payload     json.RawMessage `json:"payload"`
+	ExternalID  *string                    `json:"external_id"`
+	AlertType   string                     `json:"alert_type"`
+	Title       string                     `json:"title"`
+	Description string                     `json:"description"`
+	OccurredAt  time.Time                  `json:"occurred_at"`
+	Payload     map[string]json.RawMessage `json:"payload"`
+}
+
+// EvidenceItem mirrors the EvidenceItem schema. `type` and `summary` are
+// required by the contract and validated in the domain; `data` is an arbitrary
+// JSON object the engine never interprets.
+type EvidenceItem struct {
+	Type    string                     `json:"type"`
+	Summary string                     `json:"summary"`
+	Data    map[string]json.RawMessage `json:"data,omitempty"`
 }
 
 // Actor mirrors the Actor schema.
@@ -52,14 +70,14 @@ type AvailableChoice struct {
 
 // Step mirrors the InvestigationStep schema.
 type Step struct {
-	ID             uuid.UUID       `json:"id"`
-	SequenceNumber int             `json:"sequence_number"`
-	NodeID         uuid.UUID       `json:"node_id"`
-	SelectedEdgeID uuid.UUID       `json:"selected_edge_id"`
-	Actor          Actor           `json:"actor"`
-	Rationale      *string         `json:"rationale"`
-	Evidence       json.RawMessage `json:"evidence"`
-	CreatedAt      time.Time       `json:"created_at"`
+	ID             uuid.UUID      `json:"id"`
+	SequenceNumber int            `json:"sequence_number"`
+	NodeID         uuid.UUID      `json:"node_id"`
+	SelectedEdgeID uuid.UUID      `json:"selected_edge_id"`
+	Actor          Actor          `json:"actor"`
+	Rationale      *string        `json:"rationale"`
+	Evidence       []EvidenceItem `json:"evidence"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 // InvestigationState mirrors the InvestigationState schema.
@@ -85,22 +103,22 @@ type StartInvestigationRequest struct {
 // absence of any "next node" field: the server derives the destination from
 // the selected edge, so a client cannot steer the investigation off-graph.
 type SubmitDecisionRequest struct {
-	EdgeID    uuid.UUID       `json:"edge_id"`
-	Actor     Actor           `json:"actor"`
-	Rationale *string         `json:"rationale"`
-	Evidence  json.RawMessage `json:"evidence"`
+	EdgeID    uuid.UUID      `json:"edge_id"`
+	Actor     Actor          `json:"actor"`
+	Rationale *string        `json:"rationale"`
+	Evidence  []EvidenceItem `json:"evidence"`
 }
 
 // PathStep mirrors the PathStep schema: one entry of the investigation-specific
 // path, kept separate from the canonical graph.
 type PathStep struct {
-	StepNumber     int             `json:"step_number"`
-	NodeID         uuid.UUID       `json:"node_id"`
-	SelectedEdgeID uuid.UUID       `json:"selected_edge_id"`
-	Actor          Actor           `json:"actor"`
-	Rationale      *string         `json:"rationale"`
-	Evidence       json.RawMessage `json:"evidence"`
-	CreatedAt      time.Time       `json:"created_at"`
+	StepNumber     int            `json:"step_number"`
+	NodeID         uuid.UUID      `json:"node_id"`
+	SelectedEdgeID uuid.UUID      `json:"selected_edge_id"`
+	Actor          Actor          `json:"actor"`
+	Rationale      *string        `json:"rationale"`
+	Evidence       []EvidenceItem `json:"evidence"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 // ReportInvestigation is the investigation summary embedded in a report.
@@ -146,16 +164,70 @@ func ToAlert(a alert.Alert) Alert {
 	}
 }
 
-// ToNewAlert maps an ingestion request to the domain input.
-func (r CreateAlertRequest) ToNewAlert() alert.New {
+// ToNewAlert maps an ingestion request to the domain input. The payload is
+// re-marshalled from the decoded map; an absent or empty payload becomes nil,
+// which the repository stores as the column default `{}`.
+func (r CreateAlertRequest) ToNewAlert() (alert.New, error) {
+	payload, err := marshalObject(r.Payload, "payload")
+	if err != nil {
+		return alert.New{}, err
+	}
 	return alert.New{
 		ExternalID:  r.ExternalID,
 		AlertType:   r.AlertType,
 		Title:       r.Title,
 		Description: r.Description,
-		Payload:     normalizeJSON(r.Payload),
+		Payload:     payload,
 		OccurredAt:  r.OccurredAt,
+	}, nil
+}
+
+// marshalObject renders a decoded JSON object back to bytes, or nil when it is
+// absent or empty.
+func marshalObject(obj map[string]json.RawMessage, field string) ([]byte, error) {
+	if len(obj) == 0 {
+		return nil, nil
 	}
+	encoded, err := json.Marshal(obj)
+	if err != nil {
+		return nil, apperror.BadRequest("%s is not valid JSON", field)
+	}
+	return encoded, nil
+}
+
+func toEvidenceItems(items []EvidenceItem) ([]investigation.EvidenceItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := make([]investigation.EvidenceItem, 0, len(items))
+	for i, item := range items {
+		data, err := marshalObject(item.Data, fmt.Sprintf("evidence[%d].data", i))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, investigation.EvidenceItem{
+			Type:    item.Type,
+			Summary: item.Summary,
+			Data:    data,
+		})
+	}
+	return out, nil
+}
+
+// fromEvidenceItems maps stored evidence back to the wire form. Absent
+// evidence renders as `[]` rather than `null`, so clients can iterate the
+// field unconditionally.
+func fromEvidenceItems(items []investigation.EvidenceItem) []EvidenceItem {
+	out := make([]EvidenceItem, 0, len(items))
+	for _, item := range items {
+		wire := EvidenceItem{Type: item.Type, Summary: item.Summary}
+		if len(item.Data) > 0 && string(item.Data) != "null" {
+			// Stored data was validated as an object on the way in.
+			_ = json.Unmarshal(item.Data, &wire.Data)
+		}
+		out = append(out, wire)
+	}
+	return out
 }
 
 func toActor(a investigation.Actor) Actor {
@@ -177,7 +249,11 @@ func normalizeJSON(raw json.RawMessage) []byte {
 // ToDecisionInput maps a decision request plus its idempotency key to the
 // domain input. The key comes from a header rather than the body so that a
 // retry is byte-identical to the original request.
-func (r SubmitDecisionRequest) ToDecisionInput(idempotencyKey *string) investigation.DecisionInput {
+func (r SubmitDecisionRequest) ToDecisionInput(idempotencyKey *string) (investigation.DecisionInput, error) {
+	evidence, err := toEvidenceItems(r.Evidence)
+	if err != nil {
+		return investigation.DecisionInput{}, err
+	}
 	return investigation.DecisionInput{
 		EdgeID: r.EdgeID,
 		Actor: investigation.Actor{
@@ -185,9 +261,9 @@ func (r SubmitDecisionRequest) ToDecisionInput(idempotencyKey *string) investiga
 			ID:   r.Actor.ID,
 		},
 		Rationale:      r.Rationale,
-		Evidence:       normalizeJSON(r.Evidence),
+		Evidence:       evidence,
 		IdempotencyKey: idempotencyKey,
-	}
+	}, nil
 }
 
 func toSteps(steps []investigation.Step) []Step {
@@ -200,20 +276,11 @@ func toSteps(steps []investigation.Step) []Step {
 			SelectedEdgeID: s.SelectedEdgeID,
 			Actor:          toActor(s.Actor),
 			Rationale:      s.Rationale,
-			Evidence:       evidenceOrEmpty(s.Evidence),
+			Evidence:       fromEvidenceItems(s.Evidence),
 			CreatedAt:      s.CreatedAt,
 		})
 	}
 	return out
-}
-
-// evidenceOrEmpty renders absent evidence as `[]` rather than `null`, so
-// clients can iterate the field unconditionally.
-func evidenceOrEmpty(raw []byte) json.RawMessage {
-	if len(raw) == 0 || string(raw) == "null" {
-		return json.RawMessage(`[]`)
-	}
-	return json.RawMessage(raw)
 }
 
 // ToInvestigationState maps the service view to the wire form.
@@ -252,7 +319,7 @@ func ToInvestigationReport(r investigationservice.Report) InvestigationReport {
 			SelectedEdgeID: s.SelectedEdgeID,
 			Actor:          toActor(s.Actor),
 			Rationale:      s.Rationale,
-			Evidence:       evidenceOrEmpty(s.Evidence),
+			Evidence:       fromEvidenceItems(s.Evidence),
 			CreatedAt:      s.CreatedAt,
 		})
 	}

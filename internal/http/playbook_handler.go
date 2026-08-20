@@ -4,9 +4,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/indurex/interbellum/internal/domain/playbook"
-	"github.com/indurex/interbellum/internal/http/httpdto"
-	"github.com/indurex/interbellum/internal/service/playbookservice"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/http/httpdto"
+	"github.com/nemes1s/interbellum/internal/service/playbookservice"
 )
 
 // playbookHandler serves the playbook design endpoints.
@@ -29,7 +29,12 @@ func (h *playbookHandler) create(w http.ResponseWriter, r *http.Request) {
 		AlertType:   req.AlertType,
 	}
 	if req.Definition != nil {
-		in.Graph = req.Definition.ToGraph()
+		graph, err := req.Definition.ToGraph()
+		if err != nil {
+			writeError(r.Context(), w, h.log, err)
+			return
+		}
+		in.Graph = graph
 	}
 
 	pb, def, err := h.svc.Create(r.Context(), in)
@@ -129,7 +134,13 @@ func (h *playbookHandler) replaceGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	def, err := h.svc.ReplaceGraph(r.Context(), versionID, req.ToGraph())
+	graph, err := req.ToGraph()
+	if err != nil {
+		writeError(r.Context(), w, h.log, err)
+		return
+	}
+
+	def, err := h.svc.ReplaceGraph(r.Context(), versionID, graph)
 	if err != nil {
 		writeError(r.Context(), w, h.log, err)
 		return

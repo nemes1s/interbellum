@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // builder keeps the graph fixtures in these tests readable: tests should show
@@ -341,9 +341,8 @@ func TestValidationErrorCarriesIssuesAsDetails(t *testing.T) {
 	if err.Code != apperror.CodeInvalidPlaybookGraph {
 		t.Fatalf("got code %q, want %q", err.Code, apperror.CodeInvalidPlaybookGraph)
 	}
-	if err.HTTPStatus() != 422 {
-		t.Fatalf("got status %d, want 422", err.HTTPStatus())
-	}
+	// The HTTP status this maps to is asserted in the HTTP layer, which owns
+	// that mapping; the domain only commits to the code.
 	if len(err.Details) != len(issues) {
 		t.Fatalf("got %d details, want %d", len(err.Details), len(issues))
 	}

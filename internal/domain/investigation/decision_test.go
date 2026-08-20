@@ -6,9 +6,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/investigation"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 var now = time.Date(2026, 8, 19, 10, 30, 0, 0, time.UTC)

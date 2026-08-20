@@ -17,7 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/indurex/interbellum/internal/repository/postgres"
+	"github.com/nemes1s/interbellum/internal/repository/postgres"
 )
 
 // testPool is shared by every test in the package; each test resets the data

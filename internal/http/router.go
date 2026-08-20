@@ -7,10 +7,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/service/alertservice"
-	"github.com/indurex/interbellum/internal/service/investigationservice"
-	"github.com/indurex/interbellum/internal/service/playbookservice"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/service/alertservice"
+	"github.com/nemes1s/interbellum/internal/service/investigationservice"
+	"github.com/nemes1s/interbellum/internal/service/playbookservice"
 )
 
 // Dependencies is everything the router needs. Passing one struct keeps the

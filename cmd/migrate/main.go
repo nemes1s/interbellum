@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/indurex/interbellum/internal/config"
-	"github.com/indurex/interbellum/internal/logging"
-	"github.com/indurex/interbellum/internal/repository/postgres"
+	"github.com/nemes1s/interbellum/internal/config"
+	"github.com/nemes1s/interbellum/internal/logging"
+	"github.com/nemes1s/interbellum/internal/repository/postgres"
 )
 
 func main() {

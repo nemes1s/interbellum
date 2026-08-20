@@ -65,8 +65,20 @@ podman compose up --build -d
 podman compose down -v
 ```
 
-A `docker` → `podman` shell alias also works, and makes the commands above
-copy-pasteable as written.
+The Makefile targets take a `COMPOSE` override:
+
+```bash
+make COMPOSE="podman compose" docker-up
+make COMPOSE="podman compose" docker-down
+```
+
+A `docker` → `podman` shell alias also works, and makes every command in this
+README copy-pasteable as written.
+
+Note that `make docker-up` polls `/readyz` in a loop rather than using
+`docker compose up --wait`: the flag is Compose-v2 only and `podman-compose`
+rejects it, and polling waits on the API actually answering rather than on the
+container merely having started.
 
 </details>
 
@@ -420,6 +432,39 @@ Keeping the agent a *client* means the engine is equally usable by a human, a
 rules engine, a script, or a model, and the recorded investigation looks the
 same in all four cases.
 
+### A playbook only runs against its own alert type
+
+`POST /alerts/{id}/investigations` rejects a playbook whose `alert_type`
+differs from the alert's, with `409 ALERT_TYPE_MISMATCH`.
+
+The alternative — treat playbook selection as entirely the caller's
+responsibility — is defensible, but it would leave `alert_type` decorative: a
+label the system stores and never acts on. Enforcing it means an investigation
+can never record a PLC-register-write procedure being walked against a
+failed-login alert, producing an audit trail whose questions never applied to
+the alert they were asked about.
+
+The cost is that a deliberately generic "triage anything" playbook is not
+expressible today. If that is wanted, the clean extension is an explicit
+opt-out on the playbook — a wildcard `alert_type`, or an
+`applies_to_any_alert_type` flag — rather than dropping the check, so that
+running a playbook outside its declared scope stays a decision someone made on
+purpose.
+
+### Enforced request shapes, not just documented ones
+
+The OpenAPI document is a contract, so the implementation rejects anything it
+does not describe rather than accepting whatever happens to be valid JSON.
+`evidence` is decoded into typed items with required `type` and `summary`;
+`payload` and node `metadata` are decoded through JSON objects, so a scalar or
+an array is a `400`.
+
+This is worth stating because the lax version is the easy default: decode into
+`json.RawMessage`, check the bytes parse, store them in JSONB. That happily
+accepts `"evidence": 123`, persists it, and later returns it from an endpoint
+whose published schema promises an array of objects — a contract violation
+that only shows up when someone writes a client against the spec.
+
 ### Idempotency
 
 `POST /decisions` accepts an optional `Idempotency-Key` header, unique per
@@ -480,7 +525,7 @@ never on message text.
 |---|---|
 | 400 | `BAD_REQUEST`, `VALIDATION_FAILED` |
 | 404 | `RESOURCE_NOT_FOUND` |
-| 409 | `CONFLICT`, `PLAYBOOK_VERSION_NOT_DRAFT`, `PLAYBOOK_VERSION_NOT_PUBLISHED`, `INVESTIGATION_ALREADY_COMPLETED`, `INVALID_TRANSITION`, `IDEMPOTENCY_KEY_REUSED` |
+| 409 | `CONFLICT`, `PLAYBOOK_VERSION_NOT_DRAFT`, `PLAYBOOK_VERSION_NOT_PUBLISHED`, `INVESTIGATION_ALREADY_COMPLETED`, `INVALID_TRANSITION`, `IDEMPOTENCY_KEY_REUSED`, `ALERT_TYPE_MISMATCH` |
 | 405 | `METHOD_NOT_ALLOWED` |
 | 413 | `PAYLOAD_TOO_LARGE` |
 | 422 | `INVALID_PLAYBOOK_GRAPH` (with a `details` array of every graph problem) |
@@ -620,6 +665,14 @@ collected. See [docs/architecture.md §6](docs/architecture.md).
 conditions that would justify it (autonomous evidence-gathering agents,
 high-volume ingestion) and why neither requires an API redesign are in
 [docs/architecture.md §7](docs/architecture.md).
+
+**Bulk graph writes.** Nodes and edges are written as two pipelined
+`pgx.Batch` round trips rather than one per row, so a large playbook does not
+become thousands of sequential round trips inside an open transaction. The two
+batches stay separate because every edge's foreign key needs its endpoints to
+exist first. `COPY FROM` would be faster still for very large graphs, but it
+bypasses the per-row error reporting that turns a constraint violation into a
+useful `400`.
 
 **Idempotency.** Implemented for decisions and alert ingestion. Production
 would add a retention policy for idempotency keys — they accumulate forever

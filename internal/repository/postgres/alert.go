@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/indurex/interbellum/internal/domain/alert"
+	"github.com/nemes1s/interbellum/internal/domain/alert"
 )
 
 // AlertRepository implements alert.Repository against PostgreSQL.

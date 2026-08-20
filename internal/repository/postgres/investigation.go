@@ -2,14 +2,16 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/domain/investigation"
-	"github.com/indurex/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/domain/investigation"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
 )
 
 // InvestigationRepository implements investigation.Repository against
@@ -51,19 +53,39 @@ func (r *InvestigationRepository) Create(ctx context.Context, inv investigation.
 	return created, nil
 }
 
-// Get returns an investigation by ID.
-func (r *InvestigationRepository) Get(ctx context.Context, id uuid.UUID) (investigation.Investigation, error) {
-	row := r.pool.QueryRow(ctx, `SELECT `+investigationColumns+` FROM investigations WHERE id = $1`, id)
+// GetWithSteps returns an investigation and its ordered audit trail from one
+// consistent snapshot.
+//
+// The REPEATABLE READ transaction is the whole point: under PostgreSQL's
+// default READ COMMITTED, every statement takes a *fresh* snapshot, so two
+// queries in one transaction can still straddle a concurrent decision's
+// commit. REPEATABLE READ pins both reads to the same instant. It is read-only
+// and touches two indexed rows sets, so the cost is negligible.
+func (r *InvestigationRepository) GetWithSteps(ctx context.Context, id uuid.UUID) (investigation.Investigation, []investigation.Step, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return investigation.Investigation{}, nil, translate(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `SELECT `+investigationColumns+` FROM investigations WHERE id = $1`, id)
 	inv, err := scanInvestigation(row)
 	if err != nil {
-		return investigation.Investigation{}, notFound(err, "investigation")
+		return investigation.Investigation{}, nil, notFound(err, "investigation")
 	}
-	return inv, nil
+
+	steps, err := loadSteps(ctx, tx, id)
+	if err != nil {
+		return investigation.Investigation{}, nil, err
+	}
+	return inv, steps, nil
 }
 
-// Steps returns the append-only audit trail in sequence order.
-func (r *InvestigationRepository) Steps(ctx context.Context, investigationID uuid.UUID) ([]investigation.Step, error) {
-	rows, err := r.pool.Query(ctx, `
+func loadSteps(ctx context.Context, q querier, investigationID uuid.UUID) ([]investigation.Step, error) {
+	rows, err := q.Query(ctx, `
 		SELECT `+stepColumns+`
 		FROM investigation_steps
 		WHERE investigation_id = $1
@@ -191,6 +213,11 @@ func findStepByIdempotencyKey(
 	investigationID uuid.UUID,
 	in investigation.DecisionInput,
 ) (investigation.Step, bool, error) {
+	encodedEvidence, err := encodeEvidence(in.Evidence)
+	if err != nil {
+		return investigation.Step{}, false, err
+	}
+
 	row := tx.QueryRow(ctx, `
 		SELECT `+stepColumns+`,
 			(selected_edge_id = $3
@@ -201,15 +228,16 @@ func findStepByIdempotencyKey(
 		FROM investigation_steps
 		WHERE investigation_id = $1 AND idempotency_key = $2`,
 		investigationID, *in.IdempotencyKey,
-		in.EdgeID, string(in.Actor.Type), in.Actor.ID, in.Rationale, nullableJSON(in.Evidence))
+		in.EdgeID, string(in.Actor.Type), in.Actor.ID, in.Rationale, encodedEvidence)
 
 	var (
-		step       investigation.Step
-		equivalent bool
+		step        investigation.Step
+		rawEvidence []byte
+		equivalent  bool
 	)
-	err := row.Scan(&step.ID, &step.InvestigationID, &step.PlaybookVersionID, &step.SequenceNumber,
+	err = row.Scan(&step.ID, &step.InvestigationID, &step.PlaybookVersionID, &step.SequenceNumber,
 		&step.NodeID, &step.SelectedEdgeID, &step.Actor.Type, &step.Actor.ID, &step.Rationale,
-		&step.Evidence, &step.IdempotencyKey, &step.CreatedAt, &equivalent)
+		&rawEvidence, &step.IdempotencyKey, &step.CreatedAt, &equivalent)
 	switch {
 	case isNoRows(err):
 		return investigation.Step{}, false, nil
@@ -219,9 +247,13 @@ func findStepByIdempotencyKey(
 		return investigation.Step{}, false, apperror.Conflict(apperror.CodeIdempotencyKeyReused,
 			"idempotency key %q was already used on this investigation with a different request",
 			*in.IdempotencyKey)
-	default:
-		return step, true, nil
 	}
+
+	step.Evidence, err = decodeEvidence(rawEvidence)
+	if err != nil {
+		return investigation.Step{}, false, err
+	}
+	return step, true, nil
 }
 
 // loadEdgeWithDestination fetches an edge and the node it points at, both
@@ -268,6 +300,11 @@ func insertStep(
 	in investigation.DecisionInput,
 	edge playbook.Edge,
 ) (investigation.Step, error) {
+	encodedEvidence, err := encodeEvidence(in.Evidence)
+	if err != nil {
+		return investigation.Step{}, err
+	}
+
 	row := tx.QueryRow(ctx, `
 		INSERT INTO investigation_steps
 			(investigation_id, playbook_version_id, sequence_number, node_id, selected_edge_id,
@@ -279,7 +316,7 @@ func insertStep(
 			$3, $4, $5, $6, $7, $8::jsonb, $9)
 		RETURNING `+stepColumns,
 		inv.ID, inv.PlaybookVersionID, inv.CurrentNodeID, edge.ID,
-		string(in.Actor.Type), in.Actor.ID, in.Rationale, nullableJSON(in.Evidence), in.IdempotencyKey)
+		string(in.Actor.Type), in.Actor.ID, in.Rationale, encodedEvidence, in.IdempotencyKey)
 
 	step, err := scanStep(row)
 	if err != nil {
@@ -311,18 +348,44 @@ func scanInvestigation(s scanner) (investigation.Investigation, error) {
 }
 
 func scanStep(s scanner) (investigation.Step, error) {
-	var step investigation.Step
+	var (
+		step investigation.Step
+		raw  []byte
+	)
 	err := s.Scan(&step.ID, &step.InvestigationID, &step.PlaybookVersionID, &step.SequenceNumber,
 		&step.NodeID, &step.SelectedEdgeID, &step.Actor.Type, &step.Actor.ID, &step.Rationale,
-		&step.Evidence, &step.IdempotencyKey, &step.CreatedAt)
+		&raw, &step.IdempotencyKey, &step.CreatedAt)
+	if err != nil {
+		return investigation.Step{}, err
+	}
+	step.Evidence, err = decodeEvidence(raw)
 	return step, err
 }
 
-// nullableJSON keeps empty evidence as SQL NULL rather than an empty string,
-// which would fail the ::jsonb cast.
-func nullableJSON(raw []byte) any {
-	if len(raw) == 0 {
-		return nil
+// encodeEvidence renders evidence for storage. Absent evidence becomes SQL
+// NULL rather than an empty string (which would fail the ::jsonb cast) or an
+// empty array (which would make "no evidence" and "an empty list" two
+// different stored values that must then compare equal for idempotency).
+func encodeEvidence(items []investigation.EvidenceItem) (any, error) {
+	if len(items) == 0 {
+		return nil, nil
 	}
-	return string(raw)
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return nil, apperror.Internal(fmt.Errorf("encode evidence: %w", err))
+	}
+	return string(encoded), nil
+}
+
+// decodeEvidence reads evidence back out of JSONB.
+func decodeEvidence(raw []byte) ([]investigation.EvidenceItem, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []investigation.EvidenceItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		// Only reachable if something wrote a shape this code never writes.
+		return nil, apperror.Internal(fmt.Errorf("decode stored evidence: %w", err))
+	}
+	return items, nil
 }

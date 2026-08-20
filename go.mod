@@ -1,4 +1,4 @@
-module github.com/indurex/interbellum
+module github.com/nemes1s/interbellum
 
 go 1.25.0
 

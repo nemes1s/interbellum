@@ -7,6 +7,10 @@
 TEST_DATABASE_URL ?= postgres://indurex:indurex@localhost:5432/indurex?sslmode=disable
 DATABASE_URL      ?= $(TEST_DATABASE_URL)
 
+# Container tooling. Podman is CLI-compatible here, so `make COMPOSE="podman
+# compose" docker-up` works, as does a docker->podman alias.
+COMPOSE ?= docker compose
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -52,21 +56,41 @@ migrate: ## Apply database migrations without starting the API.
 openapi-lint: ## Validate the OpenAPI document (requires npx).
 	npx --yes @redocly/cli lint api/openapi.yaml
 
+# `docker compose up --wait` would be tidier, but it is Compose-v2 only and
+# podman-compose rejects it. Polling /readyz and pg_isready keeps these targets
+# working under both, and waits on the thing that actually matters — the
+# service answering — rather than on the container being started.
 .PHONY: docker-up
-docker-up: ## Start PostgreSQL and the API via docker compose.
-	docker compose up --build -d --wait
+docker-up: ## Start PostgreSQL and the API via docker compose, and wait until the API is ready.
+	$(COMPOSE) up --build -d
+	@printf 'waiting for the API to become ready'
+	@for i in $$(seq 1 60); do \
+		if curl -fsS http://localhost:8080/readyz >/dev/null 2>&1; then \
+			printf '\nAPI ready at http://localhost:8080\n'; exit 0; \
+		fi; \
+		printf '.'; sleep 1; \
+	done; \
+	printf '\nAPI did not become ready in 60s; check `$(COMPOSE) logs api`\n'; exit 1
 
 .PHONY: docker-up-db
-docker-up-db: ## Start only PostgreSQL (useful with `make run`).
-	docker compose up -d --wait db
+docker-up-db: ## Start only PostgreSQL and wait for it to accept connections (useful with `make run`).
+	$(COMPOSE) up -d db
+	@printf 'waiting for PostgreSQL'
+	@for i in $$(seq 1 60); do \
+		if $(COMPOSE) exec -T db pg_isready -U indurex -d indurex >/dev/null 2>&1; then \
+			printf '\nPostgreSQL ready on localhost:5432\n'; exit 0; \
+		fi; \
+		printf '.'; sleep 1; \
+	done; \
+	printf '\nPostgreSQL did not become ready in 60s\n'; exit 1
 
 .PHONY: docker-down
 docker-down: ## Stop the compose stack and remove its volumes.
-	docker compose down -v
+	$(COMPOSE) down -v
 
 .PHONY: docker-logs
 docker-logs: ## Tail the API logs.
-	docker compose logs -f api
+	$(COMPOSE) logs -f api
 
 .PHONY: walkthrough
 walkthrough: ## Run the README's end-to-end example against a running API.

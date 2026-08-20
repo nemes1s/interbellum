@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/indurex/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/apperror"
 )
 
 // readinessTimeout bounds the database check so a hung connection cannot make

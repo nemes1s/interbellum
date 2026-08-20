@@ -12,11 +12,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	httpapi "github.com/indurex/interbellum/internal/http"
-	"github.com/indurex/interbellum/internal/repository/postgres"
-	"github.com/indurex/interbellum/internal/service/alertservice"
-	"github.com/indurex/interbellum/internal/service/investigationservice"
-	"github.com/indurex/interbellum/internal/service/playbookservice"
+	httpapi "github.com/nemes1s/interbellum/internal/http"
+	"github.com/nemes1s/interbellum/internal/repository/postgres"
+	"github.com/nemes1s/interbellum/internal/service/alertservice"
+	"github.com/nemes1s/interbellum/internal/service/investigationservice"
+	"github.com/nemes1s/interbellum/internal/service/playbookservice"
 )
 
 // Node and edge IDs from test/fixtures/example-playbook.json. Naming them here

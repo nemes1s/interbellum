@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/indurex/interbellum/internal/apperror"
-	"github.com/indurex/interbellum/internal/http/httpdto"
-	"github.com/indurex/interbellum/internal/service/investigationservice"
+	"github.com/nemes1s/interbellum/internal/apperror"
+	"github.com/nemes1s/interbellum/internal/http/httpdto"
+	"github.com/nemes1s/interbellum/internal/service/investigationservice"
 )
 
 // idempotencyKeyHeader lets an agent make decision submission safe to retry.
@@ -85,7 +85,13 @@ func (h *investigationHandler) submitDecision(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	state, err := h.svc.SubmitDecision(r.Context(), id, req.ToDecisionInput(idempotencyKey))
+	in, err := req.ToDecisionInput(idempotencyKey)
+	if err != nil {
+		writeError(r.Context(), w, h.log, err)
+		return
+	}
+
+	state, err := h.svc.SubmitDecision(r.Context(), id, in)
 	if err != nil {
 		writeError(r.Context(), w, h.log, err)
 		return

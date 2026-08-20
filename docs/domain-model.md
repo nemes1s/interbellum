@@ -277,12 +277,34 @@ would create it, by the DB unique constraint on `(from_node_id, label)` — a
 draft graph with that problem can never be persisted, so publish-time
 validation never needs to check for it.
 
-**Draft input is intentionally permissive.** Nothing above applies to
-`PUT /playbook-versions/{versionId}` or to `POST /playbooks`'s optional
-initial `definition` — a draft may be created and edited with zero nodes, or
-nodes but `root_node_id: null`. The API schema for a draft graph
-(`PlaybookGraphInput`) reflects this: nothing is `required`. All eight checks
-above run once, at `/publish`, never on a draft write.
+**Draft input is intentionally permissive — about completeness, not about
+coherence.** The distinction matters, and the two kinds of rule are enforced
+at different times:
+
+*Publish-time semantic validation* — the eight checks above — is about whether
+the procedure is **finished**: is there a root, is every node reachable, does
+every decision node offer a choice, is the graph acyclic. None of these apply
+to a draft write. A draft may be created and edited with zero nodes, or with
+nodes but `root_node_id: null`; `PlaybookGraphInput` marks nothing `required`
+for exactly this reason. All eight run once, at `/publish`.
+
+*Write-time structural integrity* is about whether the draft is **storable at
+all**, and is enforced immediately on every draft write, as a `400`:
+
+| Rule | Enforced by |
+|---|---|
+| `kind` is `decision` or `terminal` | service-layer input validation |
+| node `title` is present; node/edge IDs present and unique within the payload | service-layer input validation |
+| edge `label` is present, and `from_node_id`/`to_node_id` are set | service-layer input validation |
+| both edge endpoints are nodes of *this* version | composite FK `fk_playbook_edges_from/to_node_same_version` |
+| `root_node_id`, when set, is a node of this version | composite FK `fk_playbook_versions_root_node` |
+| `terminal_resolution` set iff the node is terminal | `CHECK chk_playbook_nodes_terminal_resolution` |
+| no two edges leaving one node share a label | `UNIQUE (from_node_id, label)` |
+
+An unfinished draft is a normal, expected state. An incoherent one — an
+unknown node kind, an edge pointing at a node from another version, a
+"terminal" node with no resolution — is never persisted at all, which is why
+publish-time validation never has to consider those cases.
 
 ## 6. Evidence and large artifacts (documented, not built)
 

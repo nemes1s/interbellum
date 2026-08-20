@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/indurex/interbellum/internal/http/httpdto"
-	"github.com/indurex/interbellum/internal/service/alertservice"
+	"github.com/nemes1s/interbellum/internal/http/httpdto"
+	"github.com/nemes1s/interbellum/internal/service/alertservice"
 )
 
 // alertHandler serves alert ingestion and retrieval.
@@ -26,7 +26,13 @@ func (h *alertHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, isNew, err := h.svc.Create(r.Context(), req.ToNewAlert())
+	in, err := req.ToNewAlert()
+	if err != nil {
+		writeError(r.Context(), w, h.log, err)
+		return
+	}
+
+	created, isNew, err := h.svc.Create(r.Context(), in)
 	if err != nil {
 		writeError(r.Context(), w, h.log, err)
 		return

@@ -9,12 +9,13 @@ package httpdto
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/indurex/interbellum/internal/domain/playbook"
-	"github.com/indurex/interbellum/internal/service/playbookservice"
+	"github.com/nemes1s/interbellum/internal/domain/playbook"
+	"github.com/nemes1s/interbellum/internal/service/playbookservice"
 )
 
 // Playbook mirrors the Playbook schema.
@@ -49,12 +50,17 @@ type PlaybookList struct {
 
 // Node mirrors the PlaybookNode schema.
 type Node struct {
-	ID                 uuid.UUID       `json:"id"`
-	Kind               string          `json:"kind"`
-	Title              string          `json:"title"`
-	Description        string          `json:"description"`
-	TerminalResolution *string         `json:"terminal_resolution"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	ID                 uuid.UUID `json:"id"`
+	Kind               string    `json:"kind"`
+	Title              string    `json:"title"`
+	Description        string    `json:"description"`
+	TerminalResolution *string   `json:"terminal_resolution"`
+	// Metadata decodes through a map so the object shape the OpenAPI document
+	// promises is enforced by the decoder: a scalar or array is a 400 rather
+	// than something stored and later returned as "object". See
+	// CreateAlertRequest.Payload for why nothing is lost by not keeping the
+	// raw bytes.
+	Metadata map[string]json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Edge mirrors the PlaybookEdge schema.
@@ -145,14 +151,18 @@ func ToPlaybookWithVersions(in playbookservice.PlaybookWithVersions) PlaybookWit
 
 // ToNode maps a domain node to its wire form.
 func ToNode(n playbook.Node) Node {
-	return Node{
+	node := Node{
 		ID:                 n.ID,
 		Kind:               string(n.Kind),
 		Title:              n.Title,
 		Description:        n.Description,
 		TerminalResolution: n.TerminalResolution,
-		Metadata:           json.RawMessage(n.Metadata),
 	}
+	if len(n.Metadata) > 0 && string(n.Metadata) != "null" {
+		// Stored metadata was validated as an object on the way in.
+		_ = json.Unmarshal(n.Metadata, &node.Metadata)
+	}
+	return node
 }
 
 // ToEdge maps a domain edge to its wire form.
@@ -195,20 +205,24 @@ func ToDefinition(d playbook.Definition) PlaybookVersionDefinition {
 // client-supplied so a designer can author a whole graph, including its
 // internal references, in one request — the database still enforces that every
 // reference resolves within the same version.
-func (g GraphInput) ToGraph() playbook.Graph {
+func (g GraphInput) ToGraph() (playbook.Graph, error) {
 	graph := playbook.Graph{
 		RootNodeID: g.RootNodeID,
 		Nodes:      make([]playbook.Node, 0, len(g.Nodes)),
 		Edges:      make([]playbook.Edge, 0, len(g.Edges)),
 	}
-	for _, n := range g.Nodes {
+	for i, n := range g.Nodes {
+		metadata, err := marshalObject(n.Metadata, fmt.Sprintf("nodes[%d].metadata", i))
+		if err != nil {
+			return playbook.Graph{}, err
+		}
 		graph.Nodes = append(graph.Nodes, playbook.Node{
 			ID:                 n.ID,
 			Kind:               playbook.NodeKind(n.Kind),
 			Title:              n.Title,
 			Description:        n.Description,
 			TerminalResolution: n.TerminalResolution,
-			Metadata:           normalizeJSON(n.Metadata),
+			Metadata:           metadata,
 		})
 	}
 	for _, e := range g.Edges {
@@ -221,5 +235,5 @@ func (g GraphInput) ToGraph() playbook.Graph {
 			SortOrder:   e.SortOrder,
 		})
 	}
-	return graph
+	return graph, nil
 }
