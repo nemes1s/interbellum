@@ -4,8 +4,10 @@ import type {
   ApiErrorBody,
   CreateAlertRequest,
   CreatePlaybookRequest,
+  CreatePlaybookVersionRequest,
   InvestigationReport,
   InvestigationState,
+  PlaybookGraphInput,
   PlaybookList,
   PlaybookVersionDefinition,
   PlaybookWithVersions,
@@ -105,11 +107,47 @@ export function createPlaybook(body: CreatePlaybookRequest): Promise<PlaybookWit
   return json<PlaybookWithVersions>("/playbooks", { method: "POST", body: JSON.stringify(body) });
 }
 
+/**
+ * Create a new draft version, optionally seeded from an existing version's
+ * graph.
+ *
+ * This is how a published version is "edited": the published one is frozen for
+ * good, so the change lands on a new draft that starts as a copy of it.
+ */
+export function createPlaybookVersion(
+  playbookId: UUID,
+  body: CreatePlaybookVersionRequest = {},
+): Promise<PlaybookVersionDefinition> {
+  return json<PlaybookVersionDefinition>(`/playbooks/${playbookId}/versions`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export function getPlaybookVersion(
   versionId: UUID,
   signal?: AbortSignal,
 ): Promise<PlaybookVersionDefinition> {
   return json<PlaybookVersionDefinition>(`/playbook-versions/${versionId}`, { signal });
+}
+
+/**
+ * Replace a draft version's entire graph — nodes, edges and root, in one
+ * request.
+ *
+ * Whole-graph replacement rather than per-node patching is the contract's own
+ * shape, and it is what makes the authoring form simple: the form holds the
+ * graph, and saving is one PUT of it. Rejected with `409
+ * PLAYBOOK_VERSION_NOT_DRAFT` once the version is published.
+ */
+export function replacePlaybookVersionGraph(
+  versionId: UUID,
+  body: PlaybookGraphInput,
+): Promise<PlaybookVersionDefinition> {
+  return json<PlaybookVersionDefinition>(`/playbook-versions/${versionId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 export function publishPlaybookVersion(versionId: UUID): Promise<PlaybookVersionDefinition> {

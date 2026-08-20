@@ -137,9 +137,17 @@ export function PlaybooksScreen() {
           </p>
         </div>
         {items && items.length > 0 && (
-          <Button variant="secondary" onClick={installDemoPlaybook} disabled={installing}>
-            {installing ? "Installing…" : "Install PLC demo playbook"}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" onClick={installDemoPlaybook} disabled={installing}>
+              {installing ? "Installing…" : "Install PLC demo playbook"}
+            </Button>
+            <Link
+              href="/playbooks/new"
+              className="inline-flex items-center rounded-[2px] border border-signal bg-signal px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-[#1a44bb]"
+            >
+              Design a playbook
+            </Link>
+          </div>
         )}
       </div>
 
@@ -155,11 +163,19 @@ export function PlaybooksScreen() {
               <Empty title="No playbooks yet">
                 <p>
                   Install the assignment&apos;s PLC example to get a publishable graph and a runnable
-                  investigation in one step.
+                  investigation in one step, or author one from scratch.
                 </p>
-                <Button variant="primary" className="mt-3" onClick={installDemoPlaybook} disabled={installing}>
-                  {installing ? "Installing…" : "Install PLC demo playbook"}
-                </Button>
+                <div className="mt-3 flex flex-wrap justify-center gap-2">
+                  <Button variant="primary" onClick={installDemoPlaybook} disabled={installing}>
+                    {installing ? "Installing…" : "Install PLC demo playbook"}
+                  </Button>
+                  <Link
+                    href="/playbooks/new"
+                    className="inline-flex items-center rounded-[2px] border border-rule-strong bg-panel px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:bg-sunken"
+                  >
+                    Design a playbook
+                  </Link>
+                </div>
               </Empty>
             )}
             {items && items.length > 0 && (
@@ -240,6 +256,12 @@ export function PlaybooksScreen() {
                 actions={
                   <>
                     <VersionStatusChip status={version.data.status} />
+                    <Link
+                      href={`/playbooks/${version.data.playbook_id}/versions/${version.data.id}/edit`}
+                      className="inline-flex items-center rounded-[2px] border border-rule-strong bg-panel px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:bg-sunken"
+                    >
+                      {version.data.status === "draft" ? "Edit draft" : "Open in editor"}
+                    </Link>
                     {version.data.status === "draft" && (
                       <Button variant="primary" onClick={() => publish(version.data!.id)} disabled={publishing}>
                         {publishing ? "Publishing…" : "Publish version"}

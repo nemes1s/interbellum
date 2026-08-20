@@ -3,9 +3,20 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+// `isActive` is explicit per entry because the authoring routes live *under*
+// `/playbooks`, so a prefix match would light both entries at once.
 const NAV = [
-  { href: "/playbooks", label: "Playbooks" },
-  { href: "/investigations/new", label: "Start investigation" },
+  { href: "/playbooks", label: "Playbooks", isActive: (path: string) => path === "/playbooks" },
+  {
+    href: "/playbooks/new",
+    label: "Design a playbook",
+    isActive: (path: string) => path.startsWith("/playbooks/"),
+  },
+  {
+    href: "/investigations/new",
+    label: "Start investigation",
+    isActive: (path: string) => path.startsWith("/investigations"),
+  },
 ];
 
 export function ConsoleHeader() {
@@ -21,7 +32,7 @@ export function ConsoleHeader() {
 
         <nav className="flex items-center gap-1" aria-label="Main">
           {NAV.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const active = item.isActive(pathname);
             return (
               <Link
                 key={item.href}

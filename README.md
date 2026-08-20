@@ -126,23 +126,68 @@ backend exactly as it is.
    and edge IDs so it can be run more than once. The graph is then laid out
    automatically and drawn with React Flow; click any node to inspect its
    metadata and outgoing choices.
-2. **Start investigation** (`/investigations/new`). **Load PLC demo alert**
+2. **Design a playbook** (`/playbooks/new`, and
+   `/playbooks/{playbookId}/versions/{versionId}/edit` for an existing version).
+   Authoring, as a form: a node list, an edge list whose endpoints are selects
+   over the current nodes, a root picker, and the same auto-laid-out graph
+   beside it as a live preview. **Save draft** replaces the whole graph with one
+   `PUT /playbook-versions/{id}`; **Publish version** freezes it. See
+   [Authoring a playbook](#authoring-a-playbook).
+3. **Start investigation** (`/investigations/new`). **Load PLC demo alert**
    pre-fills the ingestion form with the fixture values; submitting calls `POST
    /alerts`. Re-submitting the same `external_id` shows that the API returned
    the existing alert (`200`) rather than creating a duplicate. Published
    playbooks matching the alert's type are then listed, and choosing one calls
    `POST /alerts/{alertId}/investigations`.
-3. **Investigation runner** (`/investigations/{id}`). The current question,
+4. **Investigation runner** (`/investigations/{id}`). The current question,
    its choices, the alert payload and the history so far — the single `GET
    /investigations/{id}` response an agent reads. Pick a choice, set the actor,
    write a rationale, add evidence items, and submit. The three PLC decisions
    pre-fill their rationale and evidence from the worked example, so a reviewer
    reaches a realistic audit trail in three clicks.
-4. **Report** (`/investigations/{id}/report`). The canonical graph with the
+5. **Report** (`/investigations/{id}/report`). The canonical graph with the
    exact path taken drawn over it, and the audit timeline beneath.
 
 Every id lives in the URL, so any screen can be refreshed, bookmarked or
 shared. Nothing correctness-bearing is kept in the browser.
+
+### Authoring a playbook
+
+The authoring screen is a **form, not a canvas**: no node dragging, no
+edge-drawing by hand, no positions to save. That is not a shortcut — the stored
+graph carries no coordinates, because a playbook is a procedure rather than a
+drawing, so there is nothing for a canvas to persist. Nodes and edges are typed
+into lists, endpoints are chosen from selects over the nodes that exist, and the
+graph beside the form is a preview drawn by the same auto-layout every other
+screen uses. IDs are minted client-side with `crypto.randomUUID()`, which the
+contract allows so a whole graph and its internal references can be authored in
+one request.
+
+It is also where the two lifecycle properties the backend cares about become
+visible:
+
+**A draft may be incomplete; publishing is what validates.** Saving a version
+with no root, or no nodes at all, is a normal thing to do and succeeds —
+`PlaybookGraphInput` marks nothing required for exactly this reason. The form
+guards only what a draft *write* rejects with a `400` (a node with no title, a
+terminal without a resolution or a decision with one, two edges leaving a node
+under the same label, metadata that is not a JSON object), and marks each one
+inline without sending anything. Everything else is left to the server.
+
+**Publishing an invalid graph reports every problem at once.** Build a version
+with two decision nodes and no edges between them and press **Publish version**:
+the `422` comes back listing all five problems — both decision nodes offering no
+choices, and all three unreachable nodes — not the first one found. That list is
+rendered by the same `ErrorNotice` every other screen uses. Fix them and publish
+again, and the version is frozen: the form goes read-only and the only remaining
+action is **Create a new version from this one**, which is `POST
+/playbooks/{id}/versions` with `clone_from_version_id` — the way a published
+version is "edited", since it can never be mutated.
+
+`alert_type` is settable only at creation. It classifies every version of the
+playbook at once, so changing it later would silently reclassify published ones
+without creating a new version (docs/domain-model.md §2), and the API has no
+endpoint for it.
 
 ### How the report page is built
 
@@ -813,12 +858,16 @@ Each of these was a deliberate scope decision, to keep the work concentrated
 on the investigation domain and its correctness.
 
 - **A production frontend.** The API is the deliverable. `frontend/` is a
-  deliberately scoped review console — enough to inspect a playbook, run an
-  investigation and read its report — and not a product UI. It has no
-  drag-and-drop playbook editor, no authentication, no client-side cache or
-  store, no optimistic updates, no investigation list or search, no playbook
-  archival, and no pagination. Its one write beyond the investigation flow is
-  `publish`. See [Web UI](#web-ui).
+  deliberately scoped review console — enough to author a playbook, inspect it,
+  run an investigation and read its report — and not a product UI. It has no
+  authentication, no client-side cache or store, no optimistic updates, no
+  investigation list or search, no playbook archival, and no pagination. See
+  [Web UI](#web-ui).
+- **A drag-and-drop playbook canvas.** The authoring screen is a form over the
+  node and edge lists, with the auto-laid-out graph as a read-only preview. A
+  canvas would need positions to be meaningful, and the stored graph
+  deliberately has none — a playbook is a procedure, not a drawing. See
+  [Authoring a playbook](#authoring-a-playbook).
 - **Production authentication and authorization.** Designed above, not built.
   Building it would consume time without exercising the domain.
 - **An LLM provider integration.** Deliberate, and explained in [Key

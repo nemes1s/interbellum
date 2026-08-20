@@ -140,6 +140,11 @@ export interface CreatePlaybookRequest {
   definition?: PlaybookGraphInput | null;
 }
 
+export interface CreatePlaybookVersionRequest {
+  /** When set, the new draft's graph is seeded from this version's graph. */
+  clone_from_version_id?: UUID | null;
+}
+
 // ---------------------------------------------------------------------------
 // Alerts
 // ---------------------------------------------------------------------------
