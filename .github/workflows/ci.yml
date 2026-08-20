@@ -26,13 +26,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # Tracked files rather than `gofmt -l .`: gofmt walks the filesystem and
+      # ignores module boundaries, so on any checkout where `npm ci` has run it
+      # would also inspect vendored .go sources under frontend/node_modules.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l .)
+          # -r so an empty list is a no-op rather than gofmt reading stdin.
+          unformatted=$(git ls-files '*.go' | xargs -r gofmt -l)
           if [ -n "$unformatted" ]; then
             echo "::error::These files are not gofmt-formatted:"
             echo "$unformatted"
-            gofmt -d .
+            git ls-files '*.go' | xargs -r gofmt -d
             exit 1
           fi
 
@@ -72,14 +76,14 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: indurex
-          POSTGRES_PASSWORD: indurex
-          POSTGRES_DB: indurex_test
+          POSTGRES_USER: interbellum
+          POSTGRES_PASSWORD: interbellum
+          POSTGRES_DB: interbellum_test
         ports:
           - 5432:5432
         # The job must not start querying before initdb has finished.
         options: >-
-          --health-cmd "pg_isready -U indurex -d indurex_test"
+          --health-cmd "pg_isready -U interbellum -d interbellum_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -96,7 +100,7 @@ jobs:
       # exercises the same migration path the server uses at startup.
       - name: go test with database
         env:
-          TEST_DATABASE_URL: postgres://indurex:indurex@localhost:5432/indurex_test?sslmode=disable
+          TEST_DATABASE_URL: postgres://interbellum:interbellum@localhost:5432/interbellum_test?sslmode=disable
         run: go test -race -count=1 ./...
 
   build:
@@ -131,14 +135,64 @@ jobs:
           context: .
           push: false
           load: true
-          tags: indurex-investigation-engine:ci
+          tags: interbellum-investigation-engine:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Smoke test the image
         run: |
-          docker run --rm --entrypoint /bin/sh indurex-investigation-engine:ci \
+          docker run --rm --entrypoint /bin/sh interbellum-investigation-engine:ci \
             -c 'test -x /app/server && echo "server binary present and executable"'
+
+  web:
+    name: Web console (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run test
+
+      # Proves the production build works; the container build runs the same
+      # command, so a failure here is a failure of `docker compose up --build`.
+      - run: npm run build
+
+  web-docker:
+    name: Build web console image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: interbellum-console:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          docker run --rm --entrypoint /bin/sh interbellum-console:ci \
+            -c 'test -f /app/server.js && echo "standalone server present"'
 
   openapi:
     name: Validate OpenAPI

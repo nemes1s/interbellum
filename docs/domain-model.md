@@ -1,4 +1,4 @@
-# Domain Model — Indurex Agentic Alert Investigation Engine
+# Domain Model — Interbellum Agentic Alert Investigation Engine
 
 This document defines the entities, relationships, lifecycles, and invariants of the
 investigation engine, independent of storage or transport concerns. It is the

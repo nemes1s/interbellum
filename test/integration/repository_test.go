@@ -157,7 +157,7 @@ func TestAlertIngestionIsIdempotentOnExternalID(t *testing.T) {
 	pool := requireDB(t)
 	repos := newRepositories(pool)
 
-	externalID := "INDUREX-TEST-0001"
+	externalID := "INTERBELLUM-TEST-0001"
 	first, created, err := repos.alerts.Create(ctx(), alert.New{
 		ExternalID: &externalID,
 		AlertType:  "test_type",

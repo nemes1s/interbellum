@@ -1,4 +1,4 @@
-# Indurex — Agentic Alert Investigation Engine
+# Interbellum — Agentic Alert Investigation Engine
 
 A backend for running structured, fully auditable security-alert
 investigations in industrial/OT environments.
@@ -19,6 +19,7 @@ agent surface, and no LLM is embedded in the engine.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Web UI](#web-ui)
 - [Walkthrough](#walkthrough)
 - [Architecture](#architecture)
 - [Key decisions and trade-offs](#key-decisions-and-trade-offs)
@@ -38,14 +39,19 @@ Requires Docker. Nothing else.
 docker compose up --build
 ```
 
-That starts PostgreSQL and the API. The API applies its own database
-migrations at startup and logs what it applied — there is no migration
-sidecar and no setup script. When it is ready:
+That starts PostgreSQL, the API and the web console. The API applies its own
+database migrations at startup and logs what it applied — there is no
+migration sidecar and no setup script. When it is ready:
 
 ```bash
 curl -s localhost:8080/readyz
 # {"status":"ok"}
 ```
+
+| | |
+|---|---|
+| Web console | <http://localhost:3000> |
+| API | <http://localhost:8080> |
 
 To tear it down, including the database volume:
 
@@ -92,6 +98,101 @@ make run               # applies migrations, then serves on :8080
 ```
 
 `make help` lists every available target.
+
+---
+
+## Web UI
+
+```bash
+docker compose up --build
+```
+
+then open <http://localhost:3000>.
+
+The console is an **optional client of the same API an automated agent calls**.
+It has no private endpoints, no server-side shortcuts, and no local state that
+the backend does not already hold: every screen is one or two calls from
+[`api/openapi.yaml`](api/openapi.yaml). Deleting `frontend/` would leave the
+backend exactly as it is.
+
+### The demo flow
+
+**Playbook → Alert → Investigation → Decisions → Report**
+
+1. **Playbooks** (`/playbooks`). Opens empty on a fresh database, with one
+   action: **Install PLC demo playbook**. That creates the assignment's example
+   decision tree with `POST /playbooks` and publishes it with `POST
+   /playbook-versions/{id}/publish` — two ordinary API calls, with fresh node
+   and edge IDs so it can be run more than once. The graph is then laid out
+   automatically and drawn with React Flow; click any node to inspect its
+   metadata and outgoing choices.
+2. **Start investigation** (`/investigations/new`). **Load PLC demo alert**
+   pre-fills the ingestion form with the fixture values; submitting calls `POST
+   /alerts`. Re-submitting the same `external_id` shows that the API returned
+   the existing alert (`200`) rather than creating a duplicate. Published
+   playbooks matching the alert's type are then listed, and choosing one calls
+   `POST /alerts/{alertId}/investigations`.
+3. **Investigation runner** (`/investigations/{id}`). The current question,
+   its choices, the alert payload and the history so far — the single `GET
+   /investigations/{id}` response an agent reads. Pick a choice, set the actor,
+   write a rationale, add evidence items, and submit. The three PLC decisions
+   pre-fill their rationale and evidence from the worked example, so a reviewer
+   reaches a realistic audit trail in three clicks.
+4. **Report** (`/investigations/{id}/report`). The canonical graph with the
+   exact path taken drawn over it, and the audit timeline beneath.
+
+Every id lives in the URL, so any screen can be refreshed, bookmarked or
+shared. Nothing correctness-bearing is kept in the browser.
+
+### How the report page is built
+
+This is the one screen worth opening deliberately, because it is the backend's
+central design decision made visible:
+
+> canonical immutable graph + append-only investigation path = auditable report
+
+`GET /investigations/{id}/report` returns the playbook graph and the ordered
+`path` as **separate** fields — the graph carries no `was_visited` flags. The
+console joins them in one small pure function
+(`frontend/src/lib/report-path.ts`), which is the only place highlighting is
+decided: visited nodes come from `path[].node_id` plus the destination of the
+last selected edge, and highlighted edges come from `path[].selected_edge_id`.
+The graph is never mutated. On screen the taken route is a heavy blue conductor
+with its step numbers stamped on each selected edge; untaken branches drop to a
+hairline dash.
+
+There is exactly one case the path cannot describe, and it is handled
+explicitly rather than by inference. A version whose root is itself `terminal`
+completes an investigation at creation with **zero** steps, so its report has an
+empty `path` and nothing to derive an outcome from. For that case — and only
+when the investigation is `completed` — the report screen passes the published
+`root_node_id` in as `terminalRootNodeId`, and the root is marked visited and
+final. Every other highlight still comes from `path` alone.
+
+### Networking
+
+The browser only ever talks to `localhost:3000`. `/api/v1/*` is handled by a
+Next.js route handler (`frontend/src/app/api/[...path]/route.ts`) that forwards
+to `BACKEND_URL` **server-side** and returns the upstream status and body
+untouched — so the Go API needs no CORS configuration, gains no
+frontend-specific endpoints, and its address never appears in client
+JavaScript.
+
+| Environment | `BACKEND_URL` |
+|---|---|
+| Docker Compose | `http://api:8080` |
+| Local development | `http://localhost:8080` |
+
+### Running the console without Docker
+
+Needs Node 22+ and a reachable API.
+
+```bash
+make docker-up-db && make run    # API on :8080, in one terminal
+make web-install && make web-dev # console on :3000, in another
+```
+
+`make web-check` runs the console's lint, typecheck and tests.
 
 ---
 
@@ -555,10 +656,11 @@ Each of these has a dedicated test in `test/integration/api_safety_test.go`.
 make test               # unit tests, no database needed
 make test-integration   # everything, against a real PostgreSQL
 make lint               # gofmt + go vet
+make web-check          # web console: eslint + tsc + vitest
 ```
 
 `make test-integration` expects PostgreSQL at
-`postgres://indurex:indurex@localhost:5432/indurex`, which is what
+`postgres://interbellum:interbellum@localhost:5432/interbellum`, which is what
 `make docker-up-db` provides:
 
 ```bash
@@ -590,6 +692,17 @@ so a fresh clone runs `go test ./...` green with no setup. CI runs both modes:
 once without a database (proving the domain tests genuinely need none) and once
 with one.
 
+**Web console tests** (`frontend/tests/`) are deliberately few, and cover the
+logic that could be wrong without anyone noticing rather than the markup:
+mapping a report's `path` onto the canonical graph (including step-number
+stamping, the terminal node the last edge leads to, and an empty path);
+deterministic graph layout; evidence-form serialization against the published
+`EvidenceItem` schema; how a completed investigation renders; and how each
+structured backend error code is surfaced. There is no end-to-end browser suite
+— the happy path is covered end-to-end by `TestFullInvestigationWorkflow`
+against the real API, and adding Playwright would have cost more in
+flakiness than it bought.
+
 ---
 
 ## Configuration
@@ -599,7 +712,7 @@ docker-compose. No secrets are committed.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgres://indurex:indurex@localhost:5432/indurex?sslmode=disable` | PostgreSQL connection string |
+| `DATABASE_URL` | `postgres://interbellum:interbellum@localhost:5432/interbellum?sslmode=disable` | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` (readable locally) |
@@ -615,6 +728,14 @@ docker-compose. No secrets are committed.
 | `DB_MAX_CONN_LIFETIME` | `1h` | |
 | `DB_MAX_CONN_IDLE_TIME` | `30m` | |
 | `DB_CONNECT_TIMEOUT` | `10s` | |
+
+The web console has two of its own, read by the Next.js server only — never by
+the browser:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BACKEND_URL` | `http://localhost:8080` | API address the proxy forwards to (`http://api:8080` in compose) |
+| `PORT` | `3000` | Console listen port |
 
 ---
 
@@ -691,8 +812,13 @@ freely; destructive ones ship a release later. Production would run
 Each of these was a deliberate scope decision, to keep the work concentrated
 on the investigation domain and its correctness.
 
-- **A frontend.** The API is the deliverable; the report response is shaped so
-  a UI can render the graph and highlight the path taken with almost no work.
+- **A production frontend.** The API is the deliverable. `frontend/` is a
+  deliberately scoped review console — enough to inspect a playbook, run an
+  investigation and read its report — and not a product UI. It has no
+  drag-and-drop playbook editor, no authentication, no client-side cache or
+  store, no optimistic updates, no investigation list or search, no playbook
+  archival, and no pagination. Its one write beyond the investigation flow is
+  `publish`. See [Web UI](#web-ui).
 - **Production authentication and authorization.** Designed above, not built.
   Building it would consume time without exercising the domain.
 - **An LLM provider integration.** Deliberate, and explained in [Key

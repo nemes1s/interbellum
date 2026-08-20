@@ -1,0 +1,112 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+/*
+ * Interbellum console — a control-panel palette rather than a product palette.
+ * Cool instrument grey ground, white panels, hairline rules, one functional
+ * blue for "this is the live path / this is the primary action", and three
+ * semantic colours used only where status genuinely means something.
+ */
+@theme {
+  --color-ground: #eceef1;
+  --color-panel: #ffffff;
+  --color-sunken: #f5f6f8;
+  --color-rule: #d5dade;
+  --color-rule-strong: #b6bec5;
+  --color-ink: #14181d;
+  --color-ink-muted: #5b6570;
+  --color-ink-faint: #8c959e;
+
+  --color-signal: #1f4fd8;
+  --color-signal-soft: #e8edfd;
+
+  --color-hold: #a65a00;
+  --color-hold-soft: #fbf0e0;
+  --color-clear: #16694a;
+  --color-clear-soft: #e3f2eb;
+  --color-alarm: #a4211b;
+  --color-alarm-soft: #fbe9e7;
+
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Micro-labels are set in the mono face. Instrumentation labels a channel;
+ * it does not caption it. This is the console's type signature and it is used
+ * for every eyebrow, column head, status chip and identifier.
+ */
+@utility label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+
+@utility panel {
+  background-color: var(--color-panel);
+  border: 1px solid var(--color-rule);
+  border-radius: 3px;
+}
+
+/* Focus is always visible and always the signal colour. */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+::selection {
+  background-color: var(--color-signal-soft);
+}
+
+/* React Flow: strip its chrome back to hairlines on the panel surface. */
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls-button {
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-rule);
+  fill: var(--color-ink-muted);
+  width: 26px;
+  height: 26px;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-sunken);
+}
+
+.react-flow__edge-path {
+  /* Schematic wiring: square joins, no rounded flourishes. */
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
