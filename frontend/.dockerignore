@@ -1,0 +1,10 @@
+# Keep the build context small; the image installs its own dependencies.
+node_modules
+.next
+out
+.git
+.DS_Store
+tests
+*.tsbuildinfo
+.env
+.env.local

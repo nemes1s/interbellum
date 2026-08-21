@@ -1,4 +1,4 @@
-// Command server runs the Indurex Agentic Alert Investigation Engine API.
+// Command server runs the Interbellum Agentic Alert Investigation Engine API.
 //
 // This file is wiring only: load configuration, open the database, construct
 // repositories/services/router, serve until a signal arrives. Every decision

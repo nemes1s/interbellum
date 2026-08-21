@@ -164,7 +164,7 @@ S3-compatible object storage, and the API returns a pre-signed URL on read.
 {
   "type": "pcap_capture",
   "summary": "3.2 MB capture around the write, 10:29:50-10:30:10",
-  "data": { "object_key": "s3://indurex-evidence/2026/08/19/abc123.pcap", "bytes": 3355443 }
+  "data": { "object_key": "s3://interbellum-evidence/2026/08/19/abc123.pcap", "bytes": 3355443 }
 }
 ```
 

@@ -1,4 +1,4 @@
-# Indurex — Agentic Alert Investigation Engine
+# Interbellum — Agentic Alert Investigation Engine
 
 A backend for running structured, fully auditable security-alert
 investigations in industrial/OT environments.
@@ -19,6 +19,7 @@ agent surface, and no LLM is embedded in the engine.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Web UI](#web-ui)
 - [Walkthrough](#walkthrough)
 - [Architecture](#architecture)
 - [Key decisions and trade-offs](#key-decisions-and-trade-offs)
@@ -38,14 +39,19 @@ Requires Docker. Nothing else.
 docker compose up --build
 ```
 
-That starts PostgreSQL and the API. The API applies its own database
-migrations at startup and logs what it applied — there is no migration
-sidecar and no setup script. When it is ready:
+That starts PostgreSQL, the API and the web console. The API applies its own
+database migrations at startup and logs what it applied — there is no
+migration sidecar and no setup script. When it is ready:
 
 ```bash
 curl -s localhost:8080/readyz
 # {"status":"ok"}
 ```
+
+| | |
+|---|---|
+| Web console | <http://localhost:3000> |
+| API | <http://localhost:8080> |
 
 To tear it down, including the database volume:
 
@@ -92,6 +98,146 @@ make run               # applies migrations, then serves on :8080
 ```
 
 `make help` lists every available target.
+
+---
+
+## Web UI
+
+```bash
+docker compose up --build
+```
+
+then open <http://localhost:3000>.
+
+The console is an **optional client of the same API an automated agent calls**.
+It has no private endpoints, no server-side shortcuts, and no local state that
+the backend does not already hold: every screen is one or two calls from
+[`api/openapi.yaml`](api/openapi.yaml). Deleting `frontend/` would leave the
+backend exactly as it is.
+
+### The demo flow
+
+**Playbook → Alert → Investigation → Decisions → Report**
+
+1. **Playbooks** (`/playbooks`). Opens empty on a fresh database, with one
+   action: **Install PLC demo playbook**. That creates the assignment's example
+   decision tree with `POST /playbooks` and publishes it with `POST
+   /playbook-versions/{id}/publish` — two ordinary API calls, with fresh node
+   and edge IDs so it can be run more than once. The graph is then laid out
+   automatically and drawn with React Flow; click any node to inspect its
+   metadata and outgoing choices.
+2. **Design a playbook** (`/playbooks/new`, and
+   `/playbooks/{playbookId}/versions/{versionId}/edit` for an existing version).
+   Authoring, as a form: a node list, an edge list whose endpoints are selects
+   over the current nodes, a root picker, and the same auto-laid-out graph
+   beside it as a live preview. **Save draft** replaces the whole graph with one
+   `PUT /playbook-versions/{id}`; **Publish version** freezes it. See
+   [Authoring a playbook](#authoring-a-playbook).
+3. **Start investigation** (`/investigations/new`). **Load PLC demo alert**
+   pre-fills the ingestion form with the fixture values; submitting calls `POST
+   /alerts`. Re-submitting the same `external_id` shows that the API returned
+   the existing alert (`200`) rather than creating a duplicate. Published
+   playbooks matching the alert's type are then listed, and choosing one calls
+   `POST /alerts/{alertId}/investigations`.
+4. **Investigation runner** (`/investigations/{id}`). The current question,
+   its choices, the alert payload and the history so far — the single `GET
+   /investigations/{id}` response an agent reads. Pick a choice, set the actor,
+   write a rationale, add evidence items, and submit. The three PLC decisions
+   pre-fill their rationale and evidence from the worked example, so a reviewer
+   reaches a realistic audit trail in three clicks.
+5. **Report** (`/investigations/{id}/report`). The canonical graph with the
+   exact path taken drawn over it, and the audit timeline beneath.
+
+Every id lives in the URL, so any screen can be refreshed, bookmarked or
+shared. Nothing correctness-bearing is kept in the browser.
+
+### Authoring a playbook
+
+The authoring screen is a **form, not a canvas**: no node dragging, no
+edge-drawing by hand, no positions to save. That is not a shortcut — the stored
+graph carries no coordinates, because a playbook is a procedure rather than a
+drawing, so there is nothing for a canvas to persist. Nodes and edges are typed
+into lists, endpoints are chosen from selects over the nodes that exist, and the
+graph beside the form is a preview drawn by the same auto-layout every other
+screen uses. IDs are minted client-side with `crypto.randomUUID()`, which the
+contract allows so a whole graph and its internal references can be authored in
+one request.
+
+It is also where the two lifecycle properties the backend cares about become
+visible:
+
+**A draft may be incomplete; publishing is what validates.** Saving a version
+with no root, or no nodes at all, is a normal thing to do and succeeds —
+`PlaybookGraphInput` marks nothing required for exactly this reason. The form
+guards only what a draft *write* rejects with a `400` (a node with no title, a
+terminal without a resolution or a decision with one, two edges leaving a node
+under the same label, metadata that is not a JSON object), and marks each one
+inline without sending anything. Everything else is left to the server.
+
+**Publishing an invalid graph reports every problem at once.** Build a version
+with two decision nodes and no edges between them and press **Publish version**:
+the `422` comes back listing all five problems — both decision nodes offering no
+choices, and all three unreachable nodes — not the first one found. That list is
+rendered by the same `ErrorNotice` every other screen uses. Fix them and publish
+again, and the version is frozen: the form goes read-only and the only remaining
+action is **Create a new version from this one**, which is `POST
+/playbooks/{id}/versions` with `clone_from_version_id` — the way a published
+version is "edited", since it can never be mutated.
+
+`alert_type` is settable only at creation. It classifies every version of the
+playbook at once, so changing it later would silently reclassify published ones
+without creating a new version (docs/domain-model.md §2), and the API has no
+endpoint for it.
+
+### How the report page is built
+
+This is the one screen worth opening deliberately, because it is the backend's
+central design decision made visible:
+
+> canonical immutable graph + append-only investigation path = auditable report
+
+`GET /investigations/{id}/report` returns the playbook graph and the ordered
+`path` as **separate** fields — the graph carries no `was_visited` flags. The
+console joins them in one small pure function
+(`frontend/src/lib/report-path.ts`), which is the only place highlighting is
+decided: visited nodes come from `path[].node_id` plus the destination of the
+last selected edge, and highlighted edges come from `path[].selected_edge_id`.
+The graph is never mutated. On screen the taken route is a heavy blue conductor
+with its step numbers stamped on each selected edge; untaken branches drop to a
+hairline dash.
+
+There is exactly one case the path cannot describe, and it is handled
+explicitly rather than by inference. A version whose root is itself `terminal`
+completes an investigation at creation with **zero** steps, so its report has an
+empty `path` and nothing to derive an outcome from. For that case — and only
+when the investigation is `completed` — the report screen passes the published
+`root_node_id` in as `terminalRootNodeId`, and the root is marked visited and
+final. Every other highlight still comes from `path` alone.
+
+### Networking
+
+The browser only ever talks to `localhost:3000`. `/api/v1/*` is handled by a
+Next.js route handler (`frontend/src/app/api/[...path]/route.ts`) that forwards
+to `BACKEND_URL` **server-side** and returns the upstream status and body
+untouched — so the Go API needs no CORS configuration, gains no
+frontend-specific endpoints, and its address never appears in client
+JavaScript.
+
+| Environment | `BACKEND_URL` |
+|---|---|
+| Docker Compose | `http://api:8080` |
+| Local development | `http://localhost:8080` |
+
+### Running the console without Docker
+
+Needs Node 22+ and a reachable API.
+
+```bash
+make docker-up-db && make run    # API on :8080, in one terminal
+make web-install && make web-dev # console on :3000, in another
+```
+
+`make web-check` runs the console's lint, typecheck and tests.
 
 ---
 
@@ -555,10 +701,11 @@ Each of these has a dedicated test in `test/integration/api_safety_test.go`.
 make test               # unit tests, no database needed
 make test-integration   # everything, against a real PostgreSQL
 make lint               # gofmt + go vet
+make web-check          # web console: eslint + tsc + vitest
 ```
 
 `make test-integration` expects PostgreSQL at
-`postgres://indurex:indurex@localhost:5432/indurex`, which is what
+`postgres://interbellum:interbellum@localhost:5432/interbellum`, which is what
 `make docker-up-db` provides:
 
 ```bash
@@ -590,6 +737,17 @@ so a fresh clone runs `go test ./...` green with no setup. CI runs both modes:
 once without a database (proving the domain tests genuinely need none) and once
 with one.
 
+**Web console tests** (`frontend/tests/`) are deliberately few, and cover the
+logic that could be wrong without anyone noticing rather than the markup:
+mapping a report's `path` onto the canonical graph (including step-number
+stamping, the terminal node the last edge leads to, and an empty path);
+deterministic graph layout; evidence-form serialization against the published
+`EvidenceItem` schema; how a completed investigation renders; and how each
+structured backend error code is surfaced. There is no end-to-end browser suite
+— the happy path is covered end-to-end by `TestFullInvestigationWorkflow`
+against the real API, and adding Playwright would have cost more in
+flakiness than it bought.
+
 ---
 
 ## Configuration
@@ -599,7 +757,7 @@ docker-compose. No secrets are committed.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgres://indurex:indurex@localhost:5432/indurex?sslmode=disable` | PostgreSQL connection string |
+| `DATABASE_URL` | `postgres://interbellum:interbellum@localhost:5432/interbellum?sslmode=disable` | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` (readable locally) |
@@ -615,6 +773,14 @@ docker-compose. No secrets are committed.
 | `DB_MAX_CONN_LIFETIME` | `1h` | |
 | `DB_MAX_CONN_IDLE_TIME` | `30m` | |
 | `DB_CONNECT_TIMEOUT` | `10s` | |
+
+The web console has two of its own, read by the Next.js server only — never by
+the browser:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BACKEND_URL` | `http://localhost:8080` | API address the proxy forwards to (`http://api:8080` in compose) |
+| `PORT` | `3000` | Console listen port |
 
 ---
 
@@ -691,8 +857,17 @@ freely; destructive ones ship a release later. Production would run
 Each of these was a deliberate scope decision, to keep the work concentrated
 on the investigation domain and its correctness.
 
-- **A frontend.** The API is the deliverable; the report response is shaped so
-  a UI can render the graph and highlight the path taken with almost no work.
+- **A production frontend.** The API is the deliverable. `frontend/` is a
+  deliberately scoped review console — enough to author a playbook, inspect it,
+  run an investigation and read its report — and not a product UI. It has no
+  authentication, no client-side cache or store, no optimistic updates, no
+  investigation list or search, no playbook archival, and no pagination. See
+  [Web UI](#web-ui).
+- **A drag-and-drop playbook canvas.** The authoring screen is a form over the
+  node and edge lists, with the auto-laid-out graph as a read-only preview. A
+  canvas would need positions to be meaningful, and the stored graph
+  deliberately has none — a playbook is a procedure, not a drawing. See
+  [Authoring a playbook](#authoring-a-playbook).
 - **Production authentication and authorization.** Designed above, not built.
   Building it would consume time without exercising the domain.
 - **An LLM provider integration.** Deliberate, and explained in [Key

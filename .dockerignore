@@ -13,6 +13,10 @@ README.md
 Makefile
 docker-compose.yml
 
+# The web console is a separate image with its own build context
+# (frontend/Dockerfile); it must never enter the API's.
+frontend
+
 # Local build output — never copy a host-built binary into the image.
 bin
 out

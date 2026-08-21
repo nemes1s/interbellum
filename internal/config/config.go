@@ -55,7 +55,7 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		DatabaseURL: env("DATABASE_URL",
-			"postgres://indurex:indurex@localhost:5432/indurex?sslmode=disable"),
+			"postgres://interbellum:interbellum@localhost:5432/interbellum?sslmode=disable"),
 		HTTPAddr:  env("HTTP_ADDR", ":8080"),
 		LogLevel:  env("LOG_LEVEL", "info"),
 		LogFormat: env("LOG_FORMAT", "json"),

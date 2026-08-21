@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Indurex Agentic Alert Investigation Engine API
+  title: Interbellum Agentic Alert Investigation Engine API
   version: "1.0.0"
   license:
     name: UNLICENSED
@@ -244,7 +244,7 @@ paths:
             examples:
               plcWrite:
                 value:
-                  external_id: "INDUREX-2026-0001"
+                  external_id: "INTERBELLUM-2026-0001"
                   alert_type: "unauthorized_plc_register_write"
                   title: "Unauthorized PLC Register Write"
                   description: "Write detected on PLC-17"
@@ -701,7 +701,13 @@ components:
           description: |
             Domain-specific data, opaque to the engine. Must be a JSON object —
             a scalar or array is rejected with `400`.
+
+            Explicitly `null` is accepted and treated exactly as omission: the
+            alert is stored with an empty payload and reads back as `{}`, never
+            as `null`. This is deliberate, so a client that always serializes
+            every field does not have to special-case the empty case.
           type: object
+          nullable: true
           additionalProperties: true
 
     # ---------------------------------------------------------------
@@ -790,7 +796,14 @@ components:
         actor: { $ref: "#/components/schemas/Actor" }
         rationale: { type: string, nullable: true }
         evidence:
+          description: |
+            Explicitly `null` is accepted and treated exactly as omission — the
+            step is recorded with no evidence and reads back as `[]`, never as
+            `null`. Same rationale as `CreateAlertRequest.payload`, and it also
+            keeps an idempotent retry that sends `null` comparing equal to an
+            original that omitted the field.
           type: array
+          nullable: true
           items: { $ref: "#/components/schemas/EvidenceItem" }
 
     InvestigationState:

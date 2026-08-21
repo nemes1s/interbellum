@@ -2,18 +2,23 @@
 #
 #   docker compose up --build
 #
-# brings up PostgreSQL and the API. The API applies database migrations itself
-# at startup (RUN_MIGRATIONS=true) and logs what it applied — there is no
-# migration sidecar and no startup script to read. See docs/architecture.md for
-# why production usually separates migrations into their own deployment step.
+# brings up PostgreSQL, the API and the web console:
+#
+#   http://localhost:3000   the console
+#   http://localhost:8080   the API, unchanged
+#
+# The API applies database migrations itself at startup (RUN_MIGRATIONS=true)
+# and logs what it applied — there is no migration sidecar and no startup
+# script to read. See docs/architecture.md for why production usually separates
+# migrations into their own deployment step.
 
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: indurex
-      POSTGRES_PASSWORD: indurex
-      POSTGRES_DB: indurex
+      POSTGRES_USER: interbellum
+      POSTGRES_PASSWORD: interbellum
+      POSTGRES_DB: interbellum
     ports:
       # Exposed so the integration test suite (make test-integration) and psql
       # can reach the same database from the host.
@@ -23,7 +28,7 @@ services:
     healthcheck:
       # The API waits for this: starting it against a database still running
       # its own initdb would just crash-loop it.
-      test: ["CMD-SHELL", "pg_isready -U indurex -d indurex"]
+      test: ["CMD-SHELL", "pg_isready -U interbellum -d interbellum"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -38,7 +43,7 @@ services:
     environment:
       # These are local development credentials, not secrets. A real
       # deployment injects DATABASE_URL from a secret store — see the README.
-      DATABASE_URL: postgres://indurex:indurex@db:5432/indurex?sslmode=disable
+      DATABASE_URL: postgres://interbellum:interbellum@db:5432/interbellum?sslmode=disable
       HTTP_ADDR: ":8080"
       LOG_LEVEL: info
       LOG_FORMAT: json
@@ -53,6 +58,35 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    restart: unless-stopped
+
+  # Optional client of the API above. The API is untouched by its presence: no
+  # CORS configuration, no frontend-specific endpoints. The browser only ever
+  # talks to :3000, and Next.js forwards /api/v1/* to BACKEND_URL server-side.
+  web:
+    build:
+      context: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Reached over the compose network, so the API never has to be published
+      # to the browser's origin. Locally this is http://localhost:8080.
+      BACKEND_URL: http://api:8080
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container `localhost` resolves to
+      # ::1 first, and the Next.js server binds IPv4 only (HOSTNAME=0.0.0.0),
+      # so the IPv6 attempt is refused and the check would fail on a container
+      # that is serving perfectly well. /playbooks is prerendered, so this
+      # reports whether the console is up without depending on the API.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/playbooks"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

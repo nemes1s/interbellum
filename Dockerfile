@@ -33,7 +33,7 @@ RUN apk add --no-cache ca-certificates wget
 
 # Run as an unprivileged user: the process needs no filesystem writes and no
 # privileged ports, so there is nothing to gain from running as root.
-RUN adduser -D -u 10001 -h /app indurex
+RUN adduser -D -u 10001 -h /app interbellum
 WORKDIR /app
 
 COPY --from=build /out/server /app/server

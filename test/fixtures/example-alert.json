@@ -1,5 +1,5 @@
 {
-  "external_id": "INDUREX-2026-0001",
+  "external_id": "INTERBELLUM-2026-0001",
   "alert_type": "unauthorized_plc_register_write",
   "title": "Unauthorized PLC Register Write",
   "description": "Write detected on PLC-17",
