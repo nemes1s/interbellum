@@ -12,6 +12,7 @@ import { NodeListEditor } from "@/components/playbook/NodeListEditor";
 import {
   Button,
   Chip,
+  Empty,
   Field,
   Id,
   LabelledField,
@@ -35,7 +36,7 @@ import {
   type NodeDraft,
   type PlaybookDraft,
 } from "@/lib/playbook-draft";
-import type { PlaybookNodeKind, UUID } from "@/lib/types";
+import type { PlaybookNodeKind, PlaybookVersionDefinition, UUID } from "@/lib/types";
 import { useResource } from "@/lib/use-resource";
 
 export interface PlaybookEditorScreenProps {
@@ -75,7 +76,7 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [alertType, setAlertType] = useState("");
-  const [metadataErrors, setMetadataErrors] = useState<Record<string, string>>({});
+  const [metadataErrors, setMetadataErrors] = useState<MetadataErrors>({});
 
   const [draft, setDraft] = useState<PlaybookDraft>(EMPTY_DRAFT);
   const [errors, setErrors] = useState<DraftError[]>([]);
@@ -109,6 +110,21 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
   function mutate(next: (current: PlaybookDraft) => PlaybookDraft) {
     setDraft(next);
     setDirty(true);
+    // Every error is positional — `index` into the node or edge list — so once
+    // the draft changes they no longer describe it, and after an insert or a
+    // removal they point at the wrong row outright. They are re-derived from
+    // scratch on the next save, which is the only moment they mean anything.
+    setErrors((current) => (current.length === 0 ? current : []));
+  }
+
+  /** The metadata field the designer is fixing is no longer in error. */
+  function clearMetadataError(field: keyof MetadataErrors) {
+    setMetadataErrors((current) => {
+      if (current[field] === undefined) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
   }
 
   function addNode(kind: PlaybookNodeKind) {
@@ -184,7 +200,7 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
     if (locked) return;
 
     const serialized = serializePlaybookDraft(draft);
-    const missing: Record<string, string> = {};
+    const missing: MetadataErrors = {};
     if (!versionId) {
       if (name.trim() === "") missing.name = "A name is required.";
       if (alertType.trim() === "") missing.alertType = "An alert type is required.";
@@ -254,6 +270,15 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
 
   if (versionId && version.loading && !version.data) return <Loading what="the draft" />;
 
+  // The two ids in the path are fetched independently, so nothing but this
+  // check stops `/playbooks/A/versions/{a version of B}/edit` from opening. It
+  // has to refuse rather than merely mislabel: the header would name playbook
+  // A while every write went to B's version, and a `PUT` here replaces a whole
+  // graph. Returning before the form exists is what makes that impossible.
+  if (playbookId && version.data && version.data.playbook_id !== playbookId) {
+    return <MismatchedVersion playbookId={playbookId} version={version.data} />;
+  }
+
   return (
     <form onSubmit={save} className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -300,6 +325,7 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
       </div>
 
       {version.error ? <ErrorNotice error={version.error} onRetry={version.reload} /> : null}
+      {playbook.error ? <ErrorNotice error={playbook.error} onRetry={playbook.reload} /> : null}
       {saveError ? <ErrorNotice error={saveError} /> : null}
       {publishError ? <ErrorNotice error={publishError} /> : null}
       {cloneError ? <ErrorNotice error={cloneError} /> : null}
@@ -370,7 +396,10 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
                     <TextInput
                       id="playbook-name"
                       value={name}
-                      onChange={(e) => setName(e.target.value)}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        clearMetadataError("name");
+                      }}
                       placeholder="Unauthorized PLC Register Write"
                       aria-invalid={Boolean(metadataErrors.name)}
                     />
@@ -384,7 +413,10 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
                     <TextInput
                       id="playbook-alert-type"
                       value={alertType}
-                      onChange={(e) => setAlertType(e.target.value)}
+                      onChange={(e) => {
+                        setAlertType(e.target.value);
+                        clearMetadataError("alertType");
+                      }}
                       className="font-mono"
                       placeholder="unauthorized_plc_register_write"
                       aria-invalid={Boolean(metadataErrors.alertType)}
@@ -484,6 +516,46 @@ export function PlaybookEditorScreen({ playbookId, versionId }: PlaybookEditorSc
         </div>
       </div>
     </form>
+  );
+}
+
+/** The two metadata fields the create form validates before sending anything. */
+type MetadataErrors = Partial<Record<"name" | "alertType", string>>;
+
+/**
+ * The version in the path exists, but under a different playbook.
+ *
+ * Deliberately a dead end rather than a redirect: the URL was wrong about which
+ * playbook is being edited, and quietly rewriting it would hide that from
+ * whoever produced the link. The version's real address is offered instead.
+ */
+function MismatchedVersion({
+  playbookId,
+  version,
+}: {
+  playbookId: UUID;
+  version: PlaybookVersionDefinition;
+}) {
+  return (
+    <Panel eyebrow="Invalid route" title="That version belongs to a different playbook">
+      <div role="alert">
+        <Empty title="This version cannot be edited here">
+          <p>
+            Version <Id value={version.id} /> belongs to playbook{" "}
+            <Id value={version.playbook_id} />, not to the one named in this URL (
+            <Id value={playbookId} />
+            ). Nothing is editable, because saving would replace the graph of a version this page is
+            not the address of.
+          </p>
+          <Link
+            href={editHref(version.playbook_id, version.id)}
+            className="mt-3 inline-flex items-center rounded-[2px] border border-rule-strong bg-panel px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:bg-sunken"
+          >
+            Open it under its own playbook
+          </Link>
+        </Empty>
+      </div>
+    </Panel>
   );
 }
 

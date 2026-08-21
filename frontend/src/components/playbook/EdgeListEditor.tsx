@@ -139,7 +139,8 @@ export function EdgeListEditor({
  * A node that was selected and has since become ineligible — a decision node
  * flipped to terminal while an edge still leaves it — is still listed, so the
  * select shows what the draft actually holds rather than silently reading as
- * unset. Saving it is what surfaces the problem.
+ * unset. Saving that draft is allowed; `terminal_node_with_edges` is one of the
+ * publish-time checks, so publishing is what surfaces the problem.
  */
 function NodeOptions({
   nodes,
