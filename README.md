@@ -119,37 +119,120 @@ backend exactly as it is.
 
 **Playbook → Alert → Investigation → Decisions → Report**
 
-1. **Playbooks** (`/playbooks`). Opens empty on a fresh database, with one
-   action: **Install PLC demo playbook**. That creates the assignment's example
-   decision tree with `POST /playbooks` and publishes it with `POST
-   /playbook-versions/{id}/publish` — two ordinary API calls, with fresh node
-   and edge IDs so it can be run more than once. The graph is then laid out
-   automatically and drawn with React Flow; click any node to inspect its
-   metadata and outgoing choices.
-2. **Design a playbook** (`/playbooks/new`, and
-   `/playbooks/{playbookId}/versions/{versionId}/edit` for an existing version).
-   Authoring, as a form: a node list, an edge list whose endpoints are selects
-   over the current nodes, a root picker, and the same auto-laid-out graph
-   beside it as a live preview. **Save draft** replaces the whole graph with one
-   `PUT /playbook-versions/{id}`; **Publish version** freezes it. See
-   [Authoring a playbook](#authoring-a-playbook).
-3. **Start investigation** (`/investigations/new`). **Load PLC demo alert**
-   pre-fills the ingestion form with the fixture values; submitting calls `POST
-   /alerts`. Re-submitting the same `external_id` shows that the API returned
-   the existing alert (`200`) rather than creating a duplicate. Published
-   playbooks matching the alert's type are then listed, and choosing one calls
-   `POST /alerts/{alertId}/investigations`.
-4. **Investigation runner** (`/investigations/{id}`). The current question,
-   its choices, the alert payload and the history so far — the single `GET
-   /investigations/{id}` response an agent reads. Pick a choice, set the actor,
-   write a rationale, add evidence items, and submit. The three PLC decisions
-   pre-fill their rationale and evidence from the worked example, so a reviewer
-   reaches a realistic audit trail in three clicks.
-5. **Report** (`/investigations/{id}/report`). The canonical graph with the
-   exact path taken drawn over it, and the audit timeline beneath.
+Below is the whole flow as a reviewer actually clicks it, on a fresh database.
+Every screen is one or two calls from the published contract, and every id lives
+in the URL — so any of these pages can be refreshed, bookmarked or shared, and
+nothing correctness-bearing is kept in the browser.
 
-Every id lives in the URL, so any screen can be refreshed, bookmarked or
-shared. Nothing correctness-bearing is kept in the browser.
+On a fresh database `/playbooks` opens empty with a shortcut, **Install PLC demo
+playbook**, which creates the assignment's example tree with `POST /playbooks`
+and publishes it — two ordinary API calls, with fresh ids so it is repeatable.
+The walkthrough below skips it and authors a playbook by hand instead, because
+that is the part worth seeing.
+
+---
+
+#### 1. Design a playbook — `/playbooks/new`
+
+![The authoring screen: a Playbook metadata panel and a node list on the left, a live auto-laid-out graph preview on the right, with the root node picker above it](docs/screenshots/01-design-playbook.jpg)
+
+A form, not a canvas. Nodes and edges are typed into lists, edge endpoints are
+selects over the nodes that exist, and the graph on the right is a read-only
+preview that re-lays out as the draft changes — the same auto-layout every other
+screen uses. **Save draft** replaces the whole graph with one `PUT
+/playbook-versions/{id}`.
+
+The draft above is deliberately unfinished: the designer added a last question
+("Source seen on this segment before?") and its two outcomes, but has not wired
+them up yet. Notice the preview shows those three nodes floating unattached at
+the top left. Saving that is fine — an incomplete draft is a normal state.
+
+#### 2. Publish, and get every problem at once
+
+![The same screen after pressing Publish version, showing an INVALID_PLAYBOOK_GRAPH / HTTP 422 panel listing three graph problems: one decision node offering no choices and two nodes not reachable from the root](docs/screenshots/02-publish-validation.jpg)
+
+Publishing is what runs the graph validation, and it reports **every** problem it
+found in one response rather than stopping at the first: here, the unwired
+decision node offering no choices, plus both of its orphaned outcomes being
+unreachable from the root. Each is a `node_id` the designer can go and fix in one
+pass. Nothing was published — a failed publish changes no state at all.
+
+#### 3. Publish again, and the version freezes
+
+![The editor after a successful publish: a green banner reading "Published. This version is now frozen.", a PUBLISHED chip, a "Create a new version from this one" button, and the complete graph in the preview](docs/screenshots/03-published-frozen.jpg)
+
+With the last two edges added, the same `POST /playbook-versions/{id}/publish`
+succeeds. The version is now immutable: the form goes read-only and the only
+remaining action is **Create a new version from this one**, which is `POST
+/playbooks/{id}/versions` with `clone_from_version_id`. That is how a published
+playbook is "edited" — never by mutating it. See
+[Authoring a playbook](#authoring-a-playbook) for why.
+
+#### 4. The library — `/playbooks`
+
+![The playbook library: a sidebar listing playbooks and their versions, and the published decision graph laid out automatically with labelled Yes/No edges](docs/screenshots/04-playbook-library.jpg)
+
+The published graph, laid out with dagre and drawn with React Flow. The layout is
+computed on every render rather than stored — a playbook is a procedure, not a
+drawing, so the backend deliberately persists no coordinates. Edge ordering
+(`sort_order`, then label) is what puts "Yes" consistently left of "No", so the
+same version always draws identically. Click any node to inspect its metadata
+and outgoing choices.
+
+#### 5. Ingest an alert and bind it to a version — `/investigations/new`
+
+![The start-investigation screen: the ingested alert with its id, type, external id and JSON payload on the left, and on the right the one published playbook version whose alert type matches, with a Start investigation button](docs/screenshots/05-ingest-and-bind.jpg)
+
+Two calls, in the order the domain requires. `POST /alerts` first — ingestion is
+idempotent on `external_id`, so re-submitting the same one returns the existing
+alert (`200`) instead of duplicating it. Then the console lists **published**
+versions of playbooks registered for this alert's type, and choosing one calls
+`POST /alerts/{alertId}/investigations`.
+
+The console never guesses the version: the backend has no auto-resolution by
+`alert_type` on purpose, so the version an investigation is bound to is always
+the caller's recorded choice rather than whatever happened to be published at
+that instant. (**Load PLC demo alert** fills this form with the fixture values
+if you took the demo-playbook shortcut instead of authoring one.)
+
+#### 6. Answer the questions — `/investigations/{id}`
+
+![The investigation runner: the current decision node's question, two choices with No selected, actor type and id, a rationale textarea, and an evidence item with type, summary and JSON data](docs/screenshots/06-investigation-runner.jpg)
+
+Everything on this screen comes from the single `GET /investigations/{id}`
+response an automated agent would read: the current question, the choices
+available from it, the alert payload, and the history so far.
+
+The submission selects an **`edge_id`, never a node** — the server derives where
+that leads. That is the backend's safety property, and the form is built so
+there is no way to express anything else. Each decision carries an actor, a
+free-text rationale, and evidence items, and mints an `Idempotency-Key`
+identifying the *decision* rather than the HTTP attempt, so retrying after a
+timeout is a server-side no-op instead of a duplicate row in the audit trail.
+
+![The runner after the last decision: a completed banner showing the terminal resolution escalate_possible_intrusion, the outcome node, and the append-only history of three recorded decisions](docs/screenshots/07-resolution-reached.jpg)
+
+Reaching a terminal node completes the investigation and copies its
+`terminal_resolution` out as the final outcome. The history panel is append-only
+— nothing in the API can rewrite or delete a recorded step.
+
+#### 7. Read the report — `/investigations/{id}/report`
+
+![The investigation report: the canonical playbook graph with the route taken drawn over it as a heavy blue line with numbered steps, untaken branches dropped to hairline dashes, and the final resolution in a banner](docs/screenshots/08-report-path.jpg)
+
+This is the screen worth opening deliberately, because it is the backend's
+central design decision made visible: `GET /report` returns the canonical graph
+and the ordered `path` as **separate** fields, and the console joins them. The
+graph carries no `was_visited` flags and is never mutated — the heavy blue
+conductor with its step numbers, and the hairline dashes on branches not taken,
+are both derived from `path` alone.
+
+![The audit timeline beneath the report: each decision numbered, showing the node, the selected edge, the actor, the rationale, the evidence with its JSON data, and the node and edge UUIDs](docs/screenshots/09-audit-timeline.jpg)
+
+Beneath it, the same three steps as an auditor's timeline: which question, which
+edge was selected and where it led, who selected it, why, and on what evidence —
+with the node and edge UUIDs, so any line can be traced back to the frozen
+version it ran against.
 
 ### Authoring a playbook
 
@@ -163,36 +246,38 @@ screen uses. IDs are minted client-side with `crypto.randomUUID()`, which the
 contract allows so a whole graph and its internal references can be authored in
 one request.
 
-It is also where the two lifecycle properties the backend cares about become
-visible:
+Steps 1–3 of [the demo flow](#the-demo-flow) show it working. What that walk
+through does not spell out is **which rule is enforced when**, which is the whole
+reason the screen behaves as it does:
 
-**A draft may be incomplete; publishing is what validates.** Saving a version
-with no root, or no nodes at all, is a normal thing to do and succeeds —
-`PlaybookGraphInput` marks nothing required for exactly this reason. The form
-guards only what a draft *write* rejects with a `400` (a node with no title, a
-terminal without a resolution or a decision with one, two edges leaving a node
-under the same label, metadata that is not a JSON object), and marks each one
-inline without sending anything. Everything else is left to the server.
-
-**Publishing an invalid graph reports every problem at once.** Build a version
-with two decision nodes and no edges between them and press **Publish version**:
-the `422` comes back listing all five problems — both decision nodes offering no
-choices, and all three unreachable nodes — not the first one found. That list is
-rendered by the same `ErrorNotice` every other screen uses. Fix them and publish
-again, and the version is frozen: the form goes read-only and the only remaining
-action is **Create a new version from this one**, which is `POST
-/playbooks/{id}/versions` with `clone_from_version_id` — the way a published
-version is "edited", since it can never be mutated.
+- *Write time.* The form guards only what a draft `PUT` itself rejects with a
+  `400` — a node with no title, a terminal without a resolution or a decision
+  with one, two edges leaving a node under the same label, metadata that is not
+  a JSON object — and marks each inline without sending anything. The
+  "resolution iff terminal" rule holds by construction rather than by
+  validation: the field renders only on a terminal node and is only ever
+  serialized for one.
+- *Publish time.* Root set, full reachability, acyclicity, and every decision
+  node having a choice while every terminal has none. All of it is left to the
+  server, and its `422` — rendered by the same `ErrorNotice` every other screen
+  uses — is the point of the screen rather than something to pre-empt.
+- *Never.* Completeness. A draft with no root, or no nodes at all, saves
+  happily; `PlaybookGraphInput` marks nothing required for exactly this reason.
 
 `alert_type` is settable only at creation. It classifies every version of the
 playbook at once, so changing it later would silently reclassify published ones
 without creating a new version (docs/domain-model.md §2), and the API has no
 endpoint for it.
 
+The edit route also checks that the version in the path really belongs to the
+playbook in the path, and refuses rather than mislabels — otherwise a version of
+one playbook could open under another's name while a whole-graph `PUT` went to
+the first.
+
 ### How the report page is built
 
-This is the one screen worth opening deliberately, because it is the backend's
-central design decision made visible:
+Step 7 of [the demo flow](#the-demo-flow) shows the result. The mechanism behind
+it is the backend's central design decision:
 
 > canonical immutable graph + append-only investigation path = auditable report
 
@@ -202,9 +287,7 @@ console joins them in one small pure function
 (`frontend/src/lib/report-path.ts`), which is the only place highlighting is
 decided: visited nodes come from `path[].node_id` plus the destination of the
 last selected edge, and highlighted edges come from `path[].selected_edge_id`.
-The graph is never mutated. On screen the taken route is a heavy blue conductor
-with its step numbers stamped on each selected edge; untaken branches drop to a
-hairline dash.
+The graph is never mutated.
 
 There is exactly one case the path cannot describe, and it is handled
 explicitly rather than by inference. A version whose root is itself `terminal`
